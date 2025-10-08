@@ -1,109 +1,154 @@
-import os
+# load_cisa.py
 import json
+import math
 import boto3
+from decimal import Decimal
+from typing import Dict, Any, List, Optional
 from botocore.exceptions import ClientError
 
 DEFAULT_CONFIG = {
-    "TABLE_NAME": "cisa_data",
-    "DDB_ENDPOINT": "http://localhost:8000",
+    "TABLE_NAME": "infoservices-cybersecurity-cisa-data",
     "AWS_REGION": "us-east-1",
-    "PROJECT_ROOT": r"C:\Users\ShivamChopra\Projects\vuln\cisa_db",
-    "DAILY_DIR": None,
-    "BASELINE_FILENAME": "cisa_extract.json",
-    "BATCH_PROGRESS_SIZE": 25
+    "S3_BUCKET": None,
+    "S3_PREFIX": "vuln-raw-source/cisa/",
+    "BASELINE_FILENAME": "cisa_baseline.json",
+    "BATCH_PROGRESS_INTERVAL": 200,
+    "AWS_ACCESS_KEY_ID": None,
+    "AWS_SECRET_ACCESS_KEY": None,
 }
 
-def _resolve_config(user_config):
+
+def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]):
     cfg = DEFAULT_CONFIG.copy()
-    if user_config:
-        cfg.update(user_config)
-    if not cfg["DAILY_DIR"]:
-        cfg["DAILY_DIR"] = os.path.join(cfg["PROJECT_ROOT"], "daily_extract")
-    cfg["BASELINE_FILE"] = os.path.join(cfg["DAILY_DIR"], cfg["BASELINE_FILENAME"])
-    os.makedirs(cfg["DAILY_DIR"], exist_ok=True)
+    if user_cfg:
+        cfg.update(user_cfg)
+    if cfg["S3_PREFIX"] and not cfg["S3_PREFIX"].endswith("/"):
+        cfg["S3_PREFIX"] += "/"
     return cfg
 
-def get_dynamodb_table(cfg):
+
+def _s3_get_text_if_exists(s3_client, bucket: str, key: str) -> Optional[str]:
+    try:
+        obj = s3_client.get_object(Bucket=bucket, Key=key)
+        return obj["Body"].read().decode("utf-8")
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("NoSuchKey", "404"):
+            return None
+        raise
+
+
+def _s3_put_bytes(s3_client, bucket: str, key: str, data: bytes):
+    s3_client.put_object(Bucket=bucket, Key=key, Body=data)
+
+
+def _to_ddb_safe(v):
+    if v is None:
+        return None
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return Decimal(str(v))
+    if isinstance(v, (int, Decimal)):
+        return v
+    if isinstance(v, (list, dict)):
+        return json.dumps(v, sort_keys=True, ensure_ascii=False)
+    s = str(v).strip()
+    return s if s else None
+
+
+def sync_cisa_records_to_dynamodb_and_s3(records: List[Dict[str, Any]], user_cfg: Dict[str, Any]):
+    cfg = _resolve_cfg(user_cfg)
+    s3_bucket = cfg["S3_BUCKET"]
+    if not s3_bucket:
+        raise RuntimeError("S3_BUCKET must be set in config")
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=cfg.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=cfg.get("AWS_SECRET_ACCESS_KEY"),
+        region_name=cfg["AWS_REGION"],
+    )
     ddb = boto3.resource(
         "dynamodb",
+        aws_access_key_id=cfg.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=cfg.get("AWS_SECRET_ACCESS_KEY"),
         region_name=cfg["AWS_REGION"],
-        aws_access_key_id="dummy",
-        aws_secret_access_key="dummy",
-        endpoint_url=cfg["DDB_ENDPOINT"]
+        endpoint_url=cfg.get("DDB_ENDPOINT"),
     )
-    table = ddb.Table(cfg["TABLE_NAME"])
-    return table
 
-def load_json_to_map(path):
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return {str(r["cveID"]).strip(): r for r in data if "cveID" in r}
+    table_name = cfg["TABLE_NAME"]
+    if table_name not in ddb.meta.client.list_tables()["TableNames"]:
+        print(f"⚡ Creating DynamoDB table '{table_name}'...")
+        t = ddb.create_table(
+            TableName=table_name,
+            KeySchema=[{"AttributeName": "cveID", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "cveID", "AttributeType": "S"}],
+            ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
+        )
+        t.meta.client.get_waiter("table_exists").wait(TableName=table_name)
+        print("✅ Table created.")
+    table = ddb.Table(table_name)
 
-def items_equal(rec_a, rec_b):
-    if rec_b is None:
-        return False
-    for k, v in rec_a.items():
-        if k == "uploaded_date":
-            continue
-        if rec_a.get(k) != rec_b.get(k):
-            return False
-    return True
-
-def sync_today_with_dynamodb(current_json_path: str, config: dict = None):
-    cfg = _resolve_config(config)
-    table = get_dynamodb_table(cfg)
-
-    # Load current JSON
-    current_map = load_json_to_map(current_json_path)
-    total_current = len(current_map)
-    print(f"ℹ️ Loaded current transformed records: {total_current}")
-
-    # Load baseline if exists
-    baseline_file = cfg["BASELINE_FILE"]
+    # Load baseline
+    baseline_key = f"{cfg['S3_PREFIX']}{cfg['BASELINE_FILENAME']}"
+    print(f"🔁 Fetching baseline from s3://{s3_bucket}/{baseline_key}")
+    baseline_text = _s3_get_text_if_exists(s3, s3_bucket, baseline_key)
     baseline_map = {}
-    if os.path.exists(baseline_file):
-        baseline_map = load_json_to_map(baseline_file)
-        print(f"ℹ️ Baseline exists with {len(baseline_map)} records")
+    if baseline_text:
+        try:
+            baseline = json.loads(baseline_text)
+            for item in baseline:
+                if item.get("cveID"):
+                    baseline_map[item["cveID"]] = item
+            print(f"ℹ️ Baseline loaded: {len(baseline_map)} items")
+        except Exception as e:
+            print(f"⚠️ Failed to parse baseline: {e}")
     else:
         print("ℹ️ No baseline found (first run)")
 
-    # Compute changed/new records
-    changed_ids = [cid for cid, rec in current_map.items()
-                   if cid not in baseline_map or not items_equal(rec, baseline_map[cid])]
+    # Build map for current data
+    current_map = {r["cveID"]: r for r in records if r.get("cveID")}
+    total = len(current_map)
+    print(f"ℹ️ Total current records: {total}")
 
-    # Prepare writes
+    # Compare baseline vs new
     to_write = []
-    for cid in changed_ids:
-        rec = current_map[cid]
-        try:
-            resp = table.get_item(Key={"cveID": cid})
-            ddb_item = resp.get("Item")
-        except ClientError:
-            ddb_item = None
-        if ddb_item is None or not items_equal(rec, ddb_item):
+    for cve, rec in current_map.items():
+        base = baseline_map.get(cve)
+        if base != rec:
             to_write.append(rec)
+    print(f"ℹ️ New/changed to write: {len(to_write)}")
 
-    # Batch write
-    uploaded = 0
+    # Write new items
+    written = 0
     if to_write:
         print(f"⬆️ Writing {len(to_write)} items to DynamoDB...")
-        with table.batch_writer(overwrite_by_pkeys=["cveID"]) as batch:
-            for rec in to_write:
-                safe_item = {k: (v if v != "" else None) for k, v in rec.items()}
-                batch.put_item(Item=safe_item)
-                uploaded += 1
-        print(f"⬆️ Uploaded {uploaded}/{len(to_write)} items")
+        with table.batch_writer() as batch:
+            for i, rec in enumerate(to_write, start=1):
+                safe = {k: _to_ddb_safe(v) for k, v in rec.items()}
+                safe["cveID"] = str(safe.get("cveID"))
+                batch.put_item(Item=safe)
+                written += 1
+                if i % cfg.get("BATCH_PROGRESS_INTERVAL", 200) == 0 or i == len(to_write):
+                    print(f"⬆️ Batch wrote {i}/{len(to_write)} items")
+        print(f"✅ DynamoDB writes complete: {written}")
     else:
-        print("ℹ️ Nothing to write to DynamoDB.")
+        print("ℹ️ No new/changed records to write")
 
-    # Overwrite baseline
-    os.replace(current_json_path, baseline_file)
-    print(f"✅ Baseline updated: {baseline_file}")
+    # Upload new baseline
+    merged = baseline_map.copy()
+    merged.update(current_map)
+    merged_bytes = json.dumps(list(merged.values()), ensure_ascii=False, indent=2).encode("utf-8")
+    print(f"⬆️ Uploading baseline JSON to s3://{s3_bucket}/{baseline_key}")
+    _s3_put_bytes(s3, s3_bucket, baseline_key, merged_bytes)
+    print("✅ Baseline uploaded")
 
-    return {
-        "total_current": total_current,
-        "changed_ids": len(changed_ids),
-        "uploaded": uploaded,
-        "baseline_file": baseline_file,
-        "table": cfg["TABLE_NAME"]
+    summary = {
+        "total_current": total,
+        "to_write": len(to_write),
+        "written": written,
+        "s3_baseline": f"s3://{s3_bucket}/{baseline_key}",
     }
+    print("ℹ️ Sync summary:", summary)
+    return summary

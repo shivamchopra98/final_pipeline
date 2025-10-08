@@ -1,12 +1,5 @@
-import json
 import re
 from datetime import datetime
-
-OUTPUT_FIELDS = [
-    "cveID", "vendorProject", "product", "vulnerabilityName", "dateAdded",
-    "shortDescription", "requiredAction", "dueDate",
-    "knownRansomwareCampaignUse", "notes", "cwes"
-]
 
 CLEAN_WS = re.compile(r"\s+")
 
@@ -39,6 +32,7 @@ def _extract_entries_from_cisa_raw(raw_obj):
     for e in entries:
         if not isinstance(e, dict):
             continue
+
         def getf(*keys):
             for k in keys:
                 if k in e:
@@ -52,25 +46,22 @@ def _extract_entries_from_cisa_raw(raw_obj):
             "cveID": _clean_text(getf("cveID", "cve", "vulnerabilityID", "cveId")),
             "vendorProject": _clean_text(getf("vendorProject", "vendor", "vendor_project", "vendorName")),
             "product": _clean_text(getf("product", "productName", "products")),
-            "vulnerabilityName": _clean_text(getf("vulnerabilityName", "vulnerability_name", "vulnName", "vulnerabilityName")),
-            "dateAdded": _clean_text(getf("dateAdded", "date_added", "datePublished", "dateAdded")),
-            "shortDescription": _clean_text(getf("shortDescription", "short_description", "shortDescription")),
-            "requiredAction": _clean_text(getf("requiredAction", "required_action", "requiredAction")),
-            "dueDate": _clean_text(getf("dueDate", "due_date", "dueDate")),
-            "knownRansomwareCampaignUse": _clean_text(getf("knownRansomwareCampaignUse", "knownRansomwareCampaignUse")),
+            "vulnerabilityName": _clean_text(getf("vulnerabilityName", "vulnerability_name", "vulnName")),
+            "dateAdded": _clean_text(getf("dateAdded", "date_added", "datePublished")),
+            "shortDescription": _clean_text(getf("shortDescription", "short_description")),
+            "requiredAction": _clean_text(getf("requiredAction", "required_action")),
+            "dueDate": _clean_text(getf("dueDate", "due_date")),
+            "knownRansomwareCampaignUse": _clean_text(getf("knownRansomwareCampaignUse")),
             "notes": _clean_text(getf("notes", "note", "reference")),
             "cwes": _clean_text(getf("cwes", "cwe"))
         }
 
+        # Find CVE if missing
         if not rec["cveID"]:
-            import re, json
             CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", flags=re.IGNORECASE)
             found = None
             for v in e.values():
-                try:
-                    s = json.dumps(v)
-                except Exception:
-                    s = str(v)
+                s = str(v)
                 m = CVE_RE.search(s)
                 if m:
                     found = m.group(0).upper()
@@ -81,23 +72,18 @@ def _extract_entries_from_cisa_raw(raw_obj):
                 continue
 
         normalized.append(rec)
+
     return normalized
 
-def transform_json(local_json_path: str) -> str:
-    """
-    Transform downloaded JSON in-place.
-    Returns the same local file path.
-    """
-    print(f"🔄 Transforming local JSON: {local_json_path}")
-    with open(local_json_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
 
-    entries = _extract_entries_from_cisa_raw(raw)
+def transform_cisa_json(raw_json):
+    """
+    Transform raw JSON (in-memory) and return cleaned entries.
+    """
+    print("🔄 Transforming CISA data in-memory...")
+    entries = _extract_entries_from_cisa_raw(raw_json)
     today = datetime.now().strftime("%Y-%m-%d")
     for r in entries:
         r.setdefault("uploaded_date", today)
-
-    with open(local_json_path, "w", encoding="utf-8") as f:
-        json.dump(entries, f, indent=2, ensure_ascii=False)
-    print(f"✅ Transformation complete: {local_json_path} (records={len(entries)})")
-    return local_json_path
+    print(f"✅ Transformation complete: {len(entries)} records")
+    return entries

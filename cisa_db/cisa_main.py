@@ -1,66 +1,46 @@
+# cisa_main.py
 import os
-import boto3
-from extract import download_raw_json
-from transform import transform_json
-from load import sync_today_with_dynamodb
 from dotenv import load_dotenv
+from extract import extract_cisa_json
+from transform import transform_cisa_json
+from load import sync_cisa_records_to_dynamodb_and_s3
 
-load_dotenv()  # load .env variables
+load_dotenv()
 
-RAW_JSON_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+def build_config_from_env():
+    cfg = {
+        "S3_BUCKET": os.getenv("S3_BUCKET"),
+        "S3_PREFIX": os.getenv("S3_PREFIX", "vuln-raw-source/cisa/"),
+        "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
+        "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
+        "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
+        "TABLE_NAME": "infoservices-cybersecurity-cisa-data",  # fixed table name
+        "BASELINE_FILENAME": os.getenv("BASELINE_FILENAME", "cisa_baseline.json"),
+        "BATCH_PROGRESS_INTERVAL": int(os.getenv("BATCH_PROGRESS_INTERVAL", "200")),
+    }
+    if not cfg["S3_BUCKET"]:
+        raise RuntimeError("S3_BUCKET must be set in environment or .env")
+    if cfg["S3_PREFIX"] and not cfg["S3_PREFIX"].endswith("/"):
+        cfg["S3_PREFIX"] += "/"
+    return cfg
 
-CISA_CONFIG = {
-    "TABLE_NAME": "cisa_data",
-    "DDB_ENDPOINT": "http://localhost:8000",
-    "AWS_REGION": "us-east-1",
-    "BASELINE_FILENAME": "cisa_extract.json",
-    "BATCH_PROGRESS_SIZE": 25
-}
-
-S3_BUCKET = os.getenv("S3_BUCKET")
-S3_PREFIX = os.getenv("S3_PREFIX")
-
-def upload_to_s3(local_path):
-    s3 = boto3.client("s3")
-    key = os.path.join(S3_PREFIX, os.path.basename(local_path)).replace("\\", "/")
-    print(f"⬆️ Uploading to s3://{S3_BUCKET}/{key}")
-    s3.upload_file(local_path, S3_BUCKET, key)
-    print(f"✅ Upload complete\n✅ File stored at: s3://{S3_BUCKET}/{key}")
-    return f"s3://{S3_BUCKET}/{key}"
 
 def main():
-    daily_dir = "./daily_extract"
-    os.makedirs(daily_dir, exist_ok=True)
+    print("🚀 Starting CISA ETL (in-memory)")
 
-    # 1) Extract
-    try:
-        local_path = download_raw_json(RAW_JSON_URL, daily_dir)
-        print(f"✅ File stored locally at: {local_path}")
-    except Exception as e:
-        print(f"❌ Download failed: {e}")
-        return
+    cfg = build_config_from_env()
 
-    # 2) Transform (local)
-    try:
-        transformed_path = transform_json(local_path)
-    except Exception as e:
-        print(f"❌ Transformation failed: {e}")
-        return
+    # Default feed URL (can be overridden in .env)
+    CISA_FEED_URL = os.getenv(
+        "CISA_FEED_URL",
+        "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    )
 
-    # 3) Upload transformed JSON to S3
-    try:
-        s3_uri = upload_to_s3(transformed_path)
-    except Exception as e:
-        print(f"❌ S3 upload failed: {e}")
-        return
+    raw_json = extract_cisa_json(CISA_FEED_URL)
+    records = transform_cisa_json(raw_json)
+    result = sync_cisa_records_to_dynamodb_and_s3(records, cfg)
+    print("✅ ETL finished. Summary:", result)
 
-    # 4) Load / Sync to DynamoDB
-    try:
-        res = sync_today_with_dynamodb(transformed_path, config=CISA_CONFIG)
-        print("✅ Sync result:", res)
-    except Exception as e:
-        print(f"❌ Load/sync failed: {e}")
-        return
 
 if __name__ == "__main__":
     main()
