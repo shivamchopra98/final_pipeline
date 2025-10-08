@@ -17,7 +17,7 @@ def _expand_meta_to_keys(obj: Dict[str, Any]) -> Dict[str, Any]:
     If obj contains "meta" dict, expand each key into "meta.<key>" at top-level.
     Returns a shallow copy with meta.* keys added and original "meta" preserved (optional).
     """
-    out = dict(obj)  # shallow copy
+    out = dict(obj)
     meta = out.get("meta")
     if isinstance(meta, dict):
         for mk, mv in meta.items():

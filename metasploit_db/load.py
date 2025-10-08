@@ -11,13 +11,12 @@ from botocore.exceptions import ClientError
 
 # Config defaults (override via user_cfg)
 DEFAULT_CONFIG = {
-    "TABLE_NAME": "metasploit_data",
-    "DDB_ENDPOINT": "http://localhost:8000",
+    "TABLE_NAME": "infoservices-cybersecurity-vuln-metasploit-data",
     "AWS_REGION": "us-east-1",
     "S3_BUCKET": None,
     "S3_PREFIX": "vuln-raw-source/metasploit/",
-    "BASELINE_FILENAME": "metasploit_baseline.json",  # this will be the single canonical file on S3
-    "BATCH_PROGRESS_INTERVAL": 100,
+    "BASELINE_FILENAME": "metasploit_baseline.json",
+    "BATCH_PROGRESS_INTERVAL": 500,
     "AWS_ACCESS_KEY_ID": None,
     "AWS_SECRET_ACCESS_KEY": None,
 }
@@ -31,24 +30,17 @@ def _resolve_config(user_cfg: Dict) -> Dict:
     if user_cfg:
         cfg.update(user_cfg)
     if cfg["S3_PREFIX"] and not cfg["S3_PREFIX"].endswith("/"):
-        cfg["S3_PREFIX"] = cfg["S3_PREFIX"] + "/"
+        cfg["S3_PREFIX"] += "/"
     return cfg
 
 def _clean_for_hash(v) -> str:
-    """Canonicalize a field value for hashing: None -> '', collapse whitespace, strip."""
     if v is None:
         return ""
-    s = str(v)
-    s = s.replace("\r", " ").replace("\n", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    s = str(v).replace("\r", " ").replace("\n", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
 def _compute_content_hash_for_record(rec: Dict, canonical_fields: List[str]) -> str:
-    pieces = []
-    for f in canonical_fields:
-        pieces.append(_clean_for_hash(rec.get(f)))
-    joined = "|".join(pieces)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    return hashlib.sha256("|".join(_clean_for_hash(rec.get(f)) for f in canonical_fields).encode("utf-8")).hexdigest()
 
 def _extract_cve(refs):
     if not refs:
@@ -57,36 +49,23 @@ def _extract_cve(refs):
     return m.group(1).upper() if m else None
 
 def _normalize_for_ddb(v):
-    """Prepare value for DynamoDB: floats/number-strings -> Decimal, None -> None, else string."""
     if v is None:
         return None
-    # floats
     if isinstance(v, float):
         if math.isnan(v) or math.isinf(v):
             return None
-        try:
-            return Decimal(str(v))
-        except Exception:
-            return str(v)
-    # Decimal pass-through
+        return Decimal(str(v))
     if isinstance(v, Decimal):
         return v
-    # strings: numeric check
     if isinstance(v, str):
         s = v.strip()
-        if s == "" or s.lower() in {"none", "nan"}:
+        if s.lower() in {"none", "nan", ""}:
             return None
-        if re.fullmatch(r"-?\d+(\.\d+)?", s):
-            try:
-                return Decimal(s)
-            except Exception:
-                return s
-        return s
-    # fallback
-    try:
-        return str(v)
-    except Exception:
-        return None
+        try:
+            return Decimal(s) if re.fullmatch(r"-?\d+(\.\d+)?", s) else s
+        except Exception:
+            return s
+    return str(v)
 
 def _s3_put_bytes(s3_client, bucket: str, key: str, data: bytes):
     s3_client.put_object(Bucket=bucket, Key=key, Body=data)
@@ -107,30 +86,20 @@ def _next_meta_id_for_year(existing_ids_set, year: int) -> str:
         m = re.match(rf"^{META_ID_PREFIX}-(\d{{4}})-0*(\d+)$", str(mid))
         if not m:
             continue
-        try:
-            y = int(m.group(1)); seq = int(m.group(2))
-        except Exception:
-            continue
+        y, seq = int(m.group(1)), int(m.group(2))
         if y == year and seq > max_seq:
             max_seq = seq
     return f"{META_ID_PREFIX}-{year}-{str(max_seq + 1).zfill(6)}"
 
 def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes: bytes, user_cfg: Dict) -> Dict:
-    """
-    records: list of normalized dicts (each must include 'module_key' and canonical fields)
-    json_bytes: transformed JSON bytes (not uploaded directly anymore)
-    user_cfg: config overrides; must include S3_BUCKET
-    """
     cfg = _resolve_config(user_cfg)
     s3_bucket = cfg["S3_BUCKET"]
     s3_prefix = cfg["S3_PREFIX"]
     baseline_key = f"{s3_prefix}{cfg['BASELINE_FILENAME']}"
-    canonical_key = baseline_key  # single canonical = baseline
 
     if not s3_bucket:
         raise RuntimeError("S3_BUCKET must be set in config/env")
 
-    # boto3 clients
     s3 = boto3.client(
         "s3",
         aws_access_key_id=cfg.get("AWS_ACCESS_KEY_ID"),
@@ -141,14 +110,10 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
         "dynamodb",
         aws_access_key_id=cfg.get("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=cfg.get("AWS_SECRET_ACCESS_KEY"),
-        region_name=cfg.get("AWS_REGION"),
-        endpoint_url=cfg.get("DDB_ENDPOINT")
+        region_name=cfg.get("AWS_REGION")
     )
 
-    # NOTE: we no longer upload json_bytes separately.
-    # We will upload the merged baseline JSON (which becomes the single canonical S3 object).
-
-    # Fetch baseline JSON from S3 if exists
+    # Fetch baseline from S3
     print(f"🔁 Fetching baseline from s3://{s3_bucket}/{baseline_key}")
     baseline_text = _s3_get_text_if_exists(s3, s3_bucket, baseline_key)
     baseline_map = {}
@@ -166,22 +131,24 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
     else:
         print("ℹ️ No baseline found (first run)")
 
-    # Ensure DDB table exists (create if missing)
+    # Ensure DDB table exists
     table_name = cfg["TABLE_NAME"]
     existing_tables = ddb.meta.client.list_tables().get("TableNames", [])
+    first_run = False
     if table_name not in existing_tables:
         print(f"⚡ Creating DynamoDB table '{table_name}'...")
-        t = ddb.create_table(
+        table = ddb.create_table(
             TableName=table_name,
             KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
             AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
             ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
         )
-        t.meta.client.get_waiter("table_exists").wait(TableName=table_name)
+        table.meta.client.get_waiter("table_exists").wait(TableName=table_name)
         print("✅ Table created.")
+        first_run = True
     table = ddb.Table(table_name)
 
-    # scan existing ids from DDB to avoid META id collisions
+    # scan existing ids from DDB
     existing_generated_ids = set()
     try:
         paginator = table.meta.client.get_paginator("scan")
@@ -192,15 +159,8 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
     except Exception:
         pass
 
-    # canonical fields: infer from records (exclude generated fields)
-    if records:
-        sample = records[0]
-        excluded = {"id", "module_id", "uploaded_date", "cve_id", "content_hash"}
-        canonical_fields = [k for k in sample.keys() if k not in excluded]
-        if "module_key" in canonical_fields:
-            canonical_fields.remove("module_key")
-    else:
-        canonical_fields = []
+    # canonical fields
+    canonical_fields = [k for k in records[0].keys() if k not in {"id", "module_id", "uploaded_date", "cve_id", "content_hash"}] if records else []
 
     # Build current_map and compute content_hash
     current_map = {}
@@ -208,43 +168,27 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
         mk = rec.get("module_key")
         if not mk:
             continue
-        rec_hash = _compute_content_hash_for_record(rec, canonical_fields) if canonical_fields else ""
-        rec["content_hash"] = rec_hash
+        rec["content_hash"] = _compute_content_hash_for_record(rec, canonical_fields) if canonical_fields else ""
         current_map[str(mk)] = rec
 
-    # Determine changed keys by content_hash comparison
+    # Determine changed keys
     changed_keys = []
-    for mk, rec in current_map.items():
-        base = baseline_map.get(mk)
-        if base is None:
-            changed_keys.append(mk)
-            continue
-        base_hash = base.get("content_hash") or ""
-        if rec.get("content_hash") != base_hash:
-            changed_keys.append(mk)
-
-    # If baseline empty -> first run: write all
-    if not baseline_map:
+    if first_run or not baseline_map:
         changed_keys = list(current_map.keys())
+    else:
+        for mk, rec in current_map.items():
+            base = baseline_map.get(mk)
+            if base is None or rec.get("content_hash") != base.get("content_hash", ""):
+                changed_keys.append(mk)
 
-    print(f"ℹ️ Changed/new modules to write: {len(changed_keys)}")
+    print(f"ℹ️ Modules to write: {len(changed_keys)}")
 
     # Prepare items to write
     to_write = []
     for mk in changed_keys:
         rec = dict(current_map.get(mk) or {})
         rec["cve_id"] = _extract_cve(rec.get("references"))
-        # year from uploaded_date or current year
-        ud = rec.get("uploaded_date")
-        year = None
-        if ud:
-            try:
-                year = int(str(ud)[:4])
-            except Exception:
-                year = None
-        if year is None:
-            year = int(time.strftime("%Y"))
-        # reuse baseline id if present
+        year = int(str(rec.get("uploaded_date") or time.strftime("%Y"))[:4])
         baseline_entry = baseline_map.get(mk, {}) or {}
         existing_id = baseline_entry.get("id")
         if existing_id and existing_id in existing_generated_ids:
@@ -257,32 +201,30 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
         rec["uploaded_date"] = rec.get("uploaded_date") or time.strftime("%Y-%m-%d")
         to_write.append(rec)
 
-    # Batch write with safe conversion
+    # Write to DynamoDB
     uploaded = []
     if to_write:
         print(f"⬆️ Writing {len(to_write)} item(s) to DynamoDB...")
         with table.batch_writer() as batch:
             cnt = 0
             for item in to_write:
-                safe_item = {}
-                for k, v in item.items():
-                    safe_item[k] = _normalize_for_ddb(v)
+                safe_item = {k: _normalize_for_ddb(v) for k, v in item.items()}
                 try:
                     batch.put_item(Item=safe_item)
                     uploaded.append(safe_item.get("id"))
                 except Exception as e:
                     print(f"❌ Failed to write id={safe_item.get('id')}: {e}")
                 cnt += 1
-                if cnt % cfg.get("BATCH_PROGRESS_INTERVAL", 100) == 0 or cnt == len(to_write):
+                if cnt % cfg.get("BATCH_PROGRESS_INTERVAL", 500) == 0 or cnt == len(to_write):
                     print(f"⬆️ Batch wrote {cnt}/{len(to_write)}")
         print(f"✅ Uploaded {len(uploaded)} items")
     else:
         print("ℹ️ Nothing to write to DynamoDB.")
 
-    # Merge baseline_map and current_map; ensure content_hash and id present
+    # Merge baseline
     merged = baseline_map.copy()
     for mk, rec in current_map.items():
-        entry = dict(rec)  # contains content_hash
+        entry = dict(rec)
         base_entry = baseline_map.get(mk, {}) or {}
         if not entry.get("id") and base_entry.get("id"):
             entry["id"] = base_entry.get("id")
@@ -291,19 +233,14 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
             entry["cve_id"] = _extract_cve(entry.get("references"))
         merged[mk] = entry
 
-    baseline_list = list(merged.values())
-    baseline_bytes = json.dumps(baseline_list, ensure_ascii=False, indent=2).encode("utf-8")
+    baseline_bytes = json.dumps(list(merged.values()), ensure_ascii=False, indent=2).encode("utf-8")
+    print(f"⬆️ Uploading baseline JSON to s3://{s3_bucket}/{baseline_key}")
+    _s3_put_bytes(s3, s3_bucket, baseline_key, baseline_bytes)
+    print("✅ Baseline upload complete")
 
-    # Upload baseline JSON as the single canonical object on S3
-    print(f"⬆️ Uploading baseline JSON to s3://{s3_bucket}/{canonical_key}")
-    _s3_put_bytes(s3, s3_bucket, canonical_key, baseline_bytes)
-    print("✅ Baseline upload complete (this is the only S3 object kept)")
-
-    summary = {
+    return {
         "uploaded": len(uploaded),
         "changed_keys": len(changed_keys),
         "total_current": len(current_map),
-        "s3_baseline": f"s3://{s3_bucket}/{canonical_key}"
+        "s3_baseline": f"s3://{s3_bucket}/{baseline_key}"
     }
-    print("ℹ️ Sync summary:", summary)
-    return summary

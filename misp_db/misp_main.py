@@ -2,7 +2,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # loads .env file in cwd if present
+load_dotenv()
 
 from extract import extract_misp_text
 from transform import transform_json_text_to_records_and_json_bytes
@@ -15,8 +15,8 @@ def build_config_from_env():
         "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
         "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
-        "DDB_ENDPOINT": os.getenv("DDB_ENDPOINT", "http://localhost:8000"),
-        "TABLE_NAME": os.getenv("MISP_TABLE", "misp_data"),
+        # "DDB_ENDPOINT": os.getenv("DDB_ENDPOINT", ""),  # not required for AWS
+        "TABLE_NAME": "infoservices-cybersecurity-vuln-misp-data",
         "BASELINE_FILENAME": os.getenv("BASELINE_FILENAME", "misp_baseline.json"),
         "BATCH_PROGRESS_INTERVAL": int(os.getenv("BATCH_PROGRESS_INTERVAL", "100")),
     }

@@ -11,8 +11,7 @@ from load import sync_records_to_dynamodb_and_store_baseline
 RAW_JSON_URL = "https://raw.githubusercontent.com/rapid7/metasploit-framework/master/db/modules_metadata_base.json"
 
 METASPLOIT_CONFIG = {
-    "TABLE_NAME": os.getenv("METASPLOIT_TABLE", "metasploit_data"),
-    "DDB_ENDPOINT": os.getenv("DDB_ENDPOINT", "http://localhost:8000"),
+    "TABLE_NAME": "infoservices-cybersecurity-vuln-metasploit-data",
     "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
     "S3_BUCKET": os.getenv("S3_BUCKET"),
     "S3_PREFIX": os.getenv("S3_PREFIX", "vuln-raw-source/metasploit/"),
@@ -20,7 +19,7 @@ METASPLOIT_CONFIG = {
     "CANONICAL_FILENAME": os.getenv("CANONICAL_FILENAME", "metasploit.json"),
     "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
     "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
-    "BATCH_PROGRESS_INTERVAL": int(os.getenv("BATCH_PROGRESS_INTERVAL", "100"))
+    "BATCH_PROGRESS_INTERVAL": int(os.getenv("BATCH_PROGRESS_INTERVAL", "500"))
 }
 
 def main():
