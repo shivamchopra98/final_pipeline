@@ -1,0 +1,47 @@
+# ------------------------
+# Virtual Environment
+# ------------------------
+.venv/
+env/
+venv/
+
+# ------------------------
+# Python cache
+# ------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pym
+*.pdb
+
+# ------------------------
+# Data / Large files
+# ------------------------
+data/
+*.csv
+*.json
+*.zip
+*.tar.gz
+*.sqlite3
+*.db
+
+# ------------------------
+# Environment / Secrets
+# ------------------------
+.env
+.env.local
+.env.*.local
+
+# ------------------------
+# IDE / Editor settings
+# ------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ------------------------
+# Logs
+# ------------------------
+*.log
