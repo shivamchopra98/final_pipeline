@@ -1,4 +1,3 @@
-# load_cisa.py
 import json
 import math
 import boto3

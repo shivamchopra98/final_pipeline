@@ -1,104 +1,102 @@
-import csv
+# extract_epss.py
+import lzma
+import json
 import requests
+import itertools
 import time
-import os
-import sys
+import boto3
+from typing import List, Set, Dict, Any
+from botocore.config import Config
+from botocore.exceptions import ClientError
 
-DATA_DIR = r"C:\Users\ShivamChopra\Projects\vuln\epss_db"
-ALL_CVE_CSV = os.path.join(DATA_DIR, "daily_extract", "all_cves.csv")
-EPSs_CSV = os.path.join(DATA_DIR, "epss_extract.csv")
-API_URL = "https://api.first.org/data/v1/epss"
-BATCH_SIZE = 100
-SLEEP_TIME = 0.06  # ~1000 requests/minute
 
-# Increase CSV field size limit
-max_int = sys.maxsize
-while True:
+def download_nvd_xz_and_extract_cves(xz_url: str, timeout: int = 60) -> List[str]:
+    print(f"⬇️ Downloading {xz_url} (in-memory)...")
+    resp = requests.get(xz_url, timeout=timeout)
+    resp.raise_for_status()
+    print("🔧 Decompressing .xz (in-memory)...")
+    raw = lzma.decompress(resp.content)
+    print("🔎 Parsing JSON...")
+    parsed = json.loads(raw.decode("utf-8"))
+    cve_items = parsed.get("CVE_Items") or parsed.get("cve_items") or []
+
+    cves = []
+    for item in cve_items:
+        cve_id = item.get("cve", {}).get("CVE_data_meta", {}).get("ID") if isinstance(item.get("cve"), dict) else item.get("id")
+        if cve_id:
+            cves.append(str(cve_id).strip().upper())
+    print(f"ℹ️ Extracted {len(cves)} CVEs from NVD file")
+    return cves
+
+
+def _s3_get_existing_cves(bucket: str, key: str, region: str) -> Set[str]:
+    s3 = boto3.client("s3", region_name=region, config=Config(retries={"max_attempts": 3}))
     try:
-        csv.field_size_limit(max_int)
-        break
-    except OverflowError:
-        max_int = int(max_int / 10)
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        baseline = json.loads(resp["Body"].read().decode("utf-8"))
+        existing = {item["cve"].upper() for item in baseline if "cve" in item}
+        print(f"ℹ️ Loaded {len(existing)} existing CVEs from baseline S3")
+        return existing
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "404", "NotFound"):
+            print("ℹ️ No existing baseline found in S3 (fresh start)")
+            return set()
+        raise
 
-def extract_epss():
-    # -----------------------------
-    # Step 1: Read all CVEs
-    # -----------------------------
-    all_cves = []
-    with open(ALL_CVE_CSV, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            cve_id = row.get("id", "").strip()
-            if cve_id:
-                all_cves.append(cve_id)
 
-    print(f"📄 Total CVEs in input: {len(all_cves)}")
-
-    # -----------------------------
-    # Step 2: Read already processed CVEs
-    # -----------------------------
-    processed_cves = set()
-    if os.path.exists(EPSs_CSV):
-        with open(EPSs_CSV, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                cve = row.get("cve", "").strip()
-                if cve:
-                    processed_cves.add(cve)
-
-    print(f"📂 Already processed: {len(processed_cves)} CVEs")
-
-    # -----------------------------
-    # Step 3: Remaining CVEs
-    # -----------------------------
-    remaining_cves = [cve for cve in all_cves if cve not in processed_cves]
-    print(f"🟡 Remaining CVEs: {len(remaining_cves)}")
-    if not remaining_cves:
-        return []
-
-    # -----------------------------
-    # Step 4: Fetch EPSs data in batches
-    # -----------------------------
-    results = []
-    if not os.path.exists(EPSs_CSV):
-        with open(EPSs_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["cve", "epss", "percentile", "date"])
-
-    for i in range(0, len(remaining_cves), BATCH_SIZE):
-        batch = remaining_cves[i:i+BATCH_SIZE]
-        batch_str = ",".join(batch)
-        url = f"{API_URL}?cve={batch_str}&pretty=true"
-
+def call_epss_api_for_batch(api_base: str, cve_batch: List[str], session: requests.Session, timeout: int = 30):
+    q = ",".join(cve_batch)
+    url = f"{api_base}{q}"
+    for attempt in range(1, 5):
         try:
-            resp = requests.get(url)
-            if resp.status_code == 429:
-                print("⚠️ Rate limit exceeded. Sleeping for 120 seconds...")
-                time.sleep(120)
+            resp = session.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (429, 502, 503, 504):
+                wait = attempt * 2
+                print(f"⚠️ API {status}, backoff {wait}s (attempt {attempt})")
+                time.sleep(wait)
                 continue
-            elif resp.status_code != 200:
-                print(f"❌ Error {resp.status_code} for batch {i//BATCH_SIZE + 1}")
-                time.sleep(SLEEP_TIME)
-                continue
-
-            data = resp.json().get("data", [])
-            new_count = 0
-            with open(EPSs_CSV, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                for item in data:
-                    cve = item["cve"]
-                    if cve not in processed_cves:
-                        writer.writerow([cve, item.get("epss"), item.get("percentile"), item.get("date")])
-                        results.append(item)
-                        processed_cves.add(cve)
-                        new_count += 1
-
-            print(f"✅ Batch {i//BATCH_SIZE + 1}: {new_count} CVEs processed. Total so far: {len(processed_cves)}")
-            time.sleep(SLEEP_TIME)
-
+            raise
         except Exception as e:
-            print(f"❌ Exception during batch {i//BATCH_SIZE + 1}: {e}")
-            time.sleep(SLEEP_TIME)
+            if attempt < 4:
+                wait = attempt * 2
+                print(f"⚠️ API call error, retrying in {wait}s: {e}")
+                time.sleep(wait)
+                continue
+            raise
+    return None
 
-    print(f"✅ Extraction complete. Total new CVEs fetched: {len(results)}")
+
+def extract_epss_data_incremental(xz_url: str, epss_api_base: str, s3_bucket: str, s3_key: str, aws_region: str, batch_size: int = 50):
+    """Extract CVEs not yet in S3 baseline and query EPSS only for them."""
+    all_cves = download_nvd_xz_and_extract_cves(xz_url)
+    existing_cves = _s3_get_existing_cves(s3_bucket, s3_key, aws_region)
+    remaining = [c for c in all_cves if c not in existing_cves]
+    print(f"🧮 Remaining CVEs to fetch: {len(remaining)} (out of {len(all_cves)})")
+
+    session = requests.Session()
+    results = []
+
+    def chunks(iterable, n):
+        it = iter(iterable)
+        while True:
+            chunk = list(itertools.islice(it, n))
+            if not chunk:
+                break
+            yield chunk
+
+    for batch in chunks(remaining, batch_size):
+        print(f"➡️ Querying EPSS API for {len(batch)} CVEs (sample: {batch[:3]})")
+        resp = call_epss_api_for_batch(epss_api_base, batch, session)
+        if not resp:
+            continue
+        data = resp.get("data") if isinstance(resp, dict) else resp
+        if not data:
+            continue
+        results.extend(data)
+
+    print(f"✅ Incremental EPSS extraction complete: {len(results)} records fetched")
     return results

@@ -1,4 +1,3 @@
-# load_metasploit.py
 import re
 import time
 import json
@@ -12,13 +11,10 @@ from botocore.exceptions import ClientError
 # Config defaults (override via user_cfg)
 DEFAULT_CONFIG = {
     "TABLE_NAME": "infoservices-cybersecurity-vuln-metasploit-data",
-    "AWS_REGION": "us-east-1",
-    "S3_BUCKET": None,
     "S3_PREFIX": "vuln-raw-source/metasploit/",
     "BASELINE_FILENAME": "metasploit_baseline.json",
     "BATCH_PROGRESS_INTERVAL": 500,
-    "AWS_ACCESS_KEY_ID": None,
-    "AWS_SECRET_ACCESS_KEY": None,
+
 }
 
 META_ID_PREFIX = "META"
@@ -102,7 +98,7 @@ def sync_records_to_dynamodb_and_store_baseline(records: List[Dict], json_bytes:
 
     s3 = boto3.client(
         "s3",
-        aws_access_key_id=cfg.get("AWS_ACCESS_KEY_ID"),
+        aws_access_key_id=cfg.get("AWS_ACCESS_KEY_ID"),     
         aws_secret_access_key=cfg.get("AWS_SECRET_ACCESS_KEY"),
         region_name=cfg.get("AWS_REGION")
     )

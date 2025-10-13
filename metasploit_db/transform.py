@@ -1,4 +1,3 @@
-# transform_metasploit.py
 import json
 import re
 from datetime import datetime

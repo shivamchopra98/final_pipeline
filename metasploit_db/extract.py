@@ -1,4 +1,3 @@
-# extract_metasploit.py
 import requests
 
 def download_raw_json_to_text(url: str, timeout: int = 60) -> str:

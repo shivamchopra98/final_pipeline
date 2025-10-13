@@ -1,4 +1,3 @@
-# cisa_main.py
 import os
 from dotenv import load_dotenv
 from extract import extract_cisa_json

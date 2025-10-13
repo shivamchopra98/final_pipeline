@@ -1,138 +1,179 @@
-# load.py
-import os
+# load_epss_incremental.py
+import json
 import math
-import re
-import time
-import pandas as pd
+from decimal import Decimal
+from typing import List, Dict, Any, Optional, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
-from decimal import Decimal, InvalidOperation
+from botocore.config import Config
 from botocore.exceptions import ClientError
+import threading
 
-# Config - adjust paths if needed
-PROJECT_ROOT = r"C:\Users\ShivamChopra\Projects\vuln\epss_db"
-EPSS_CSV = os.path.join(PROJECT_ROOT, "epss_extract.csv")  # <-- file to upload
-DDB_ENDPOINT = "http://localhost:8000"
-AWS_REGION = "us-east-1"
-TABLE_NAME = "epss_data"
-PROGRESS_INTERVAL = 500  # print progress every N rows
+DEFAULT_CONFIG = {
+    "TABLE_NAME": "infoservices-cybersecurity-epss-data",
+    "S3_PREFIX": "vuln-raw-source/epss/",
+    "BASELINE_FILENAME": "epss_baseline.json",
+    "BATCH_PROGRESS_INTERVAL": 500,
+    "BATCH_WRITE_CHUNK_SIZE": 100,  # smaller to control throughput
+    "PARALLEL_THREADS": 5,  # fewer threads = fewer ProvisionedThroughput errors
+    "S3_FLUSH_INTERVAL": 1000,  # flush every 1000 records
+    "AWS_REGION": "us-east-1",
+    "DDB_ENDPOINT": "",
+}
 
-# helpers
-_num_re = re.compile(r"^-?\d+(\.\d+)?$")
 
-def is_number_string(s):
-    if s is None:
-        return False
-    s = str(s).strip()
-    return bool(_num_re.match(s))
+def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cfg = DEFAULT_CONFIG.copy()
+    if user_cfg:
+        cfg.update(user_cfg)
+    if cfg.get("S3_PREFIX") and not cfg["S3_PREFIX"].endswith("/"):
+        cfg["S3_PREFIX"] += "/"
+    return cfg
 
-def to_ddb_value(v):
-    """
-    Convert a CSV cell value to a Dynamo-friendly Python type:
-     - empty / nan -> None (Dynamo doesn't accept empty string)
-     - numeric-like strings -> Decimal(...)
-     - otherwise keep string
-    """
+
+def _chunks(iterable: Iterable, n: int):
+    chunk = []
+    for item in iterable:
+        chunk.append(item)
+        if len(chunk) >= n:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _to_ddb_safe(v):
     if v is None:
         return None
-    # pandas may give numpy.nan; treat as None
-    try:
-        if pd.isna(v):
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
             return None
-    except Exception:
-        pass
-    s = str(v).strip()
-    if s == "" or s.lower() in {"nan", "none"}:
-        return None
-    # numeric?
-    if is_number_string(s):
-        # use Decimal for Dynamo numeric
+        return Decimal(str(v))
+    if isinstance(v, (int, Decimal)):
+        return v
+    if isinstance(v, (list, dict)):
         try:
-            return Decimal(s)
-        except (InvalidOperation, Exception):
-            return s
+            return json.dumps(v, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    s = str(v).strip()
+    if s == "" or s.lower() in ("none", "nan"):
+        return None
     return s
 
-def connect_dynamodb():
-    return boto3.resource(
-        "dynamodb",
-        region_name=AWS_REGION,
-        aws_access_key_id="dummy",
-        aws_secret_access_key="dummy",
-        endpoint_url=DDB_ENDPOINT
-    )
 
-def ensure_table(ddb_resource):
-    existing_tables = ddb_resource.meta.client.list_tables().get("TableNames", [])
-    if TABLE_NAME not in existing_tables:
-        print(f"⚡ Creating local DynamoDB table '{TABLE_NAME}' ...")
-        table = ddb_resource.create_table(
-            TableName=TABLE_NAME,
-            KeySchema=[{"AttributeName": "cve", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "cve", "AttributeType": "S"}],
-            ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
-        )
-        table.meta.client.get_waiter("table_exists").wait(TableName=TABLE_NAME)
-        print("✅ Table created.")
-    else:
-        table = ddb_resource.Table(TABLE_NAME)
-        print(f"ℹ️ Table '{TABLE_NAME}' exists.")
-    return ddb_resource.Table(TABLE_NAME)
+VOLATILE_FIELDS = {"date_updated"}
 
-def load():
-    # 1) read CSV
-    if not os.path.exists(EPSS_CSV):
-        raise FileNotFoundError(f"EPSs CSV not found: {EPSS_CSV}")
-    print(f"📄 Reading CSV: {EPSS_CSV}")
-    # read as strings to avoid unintended numeric casting
-    df = pd.read_csv(EPSS_CSV, dtype=str, keep_default_na=False)
-    total = len(df)
-    print(f"ℹ️ Rows in CSV: {total}")
 
-    # ensure the 'cve' column exists
-    if "cve" not in df.columns:
-        raise ValueError("CSV must contain a 'cve' column (case-sensitive).")
+def _canonical_for_compare(obj):
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {k: _canonical_for_compare(v) for k, v in sorted(obj.items()) if k not in VOLATILE_FIELDS}
+    if isinstance(obj, list):
+        return [_canonical_for_compare(i) for i in obj]
+    return obj
 
-    # 2) connect and ensure table
-    ddb = connect_dynamodb()
-    table = ensure_table(ddb)
 
-    # 3) batch write all rows
-    uploaded = 0
-    start = time.time()
-    with table.batch_writer(overwrite_by_pkeys=["cve"]) as batch:
-        for idx, row in df.iterrows():
-            # build item dict
-            item = {}
-            for col in df.columns:
-                val = row.get(col)
-                # convert to DDB friendly
-                item[col] = to_ddb_value(val)
-            # ensure partition key 'cve' is a string and present
-            if item.get("cve") is None:
-                print(f"⚠️ Skipping row {idx} missing 'cve'")
-                continue
-            # Dynamo requires the partition key to be a string (we can stringify if it's Decimal)
-            if isinstance(item["cve"], Decimal):
-                item["cve"] = str(item["cve"])
-            try:
-                batch.put_item(Item=item)
-                uploaded += 1
-            except ClientError as e:
-                print(f"❌ Failed to write cve={item.get('cve')}: {e}")
-            # progress
-            if uploaded % PROGRESS_INTERVAL == 0:
-                elapsed = time.time() - start
-                print(f"⬆️ Uploaded {uploaded}/{total} rows ({elapsed:.1f}s elapsed)")
-
-    elapsed = time.time() - start
-    print(f"✅ Finished upload: {uploaded}/{total} rows uploaded in {elapsed:.1f}s")
-
-    # optional verify: count items in table (scan)
+def _serialize_canonical(obj):
     try:
-        resp = table.meta.client.describe_table(TableName=TABLE_NAME)
-        print("ℹ️ DynamoDB table status:", resp["Table"]["TableStatus"])
+        return json.dumps(_canonical_for_compare(obj), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     except Exception:
-        pass
+        return json.dumps(obj, default=str, sort_keys=True, ensure_ascii=False)
 
-if __name__ == "__main__":
-    load()
+
+def _s3_get_text_if_exists(s3_client, bucket: str, key: str) -> Optional[str]:
+    try:
+        resp = s3_client.get_object(Bucket=bucket, Key=key)
+        return resp["Body"].read().decode("utf-8")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") in ("NoSuchKey", "404", "NotFound"):
+            return None
+        raise
+
+
+def _s3_put_bytes(s3_client, bucket: str, key: str, bts: bytes):
+    s3_client.put_object(Bucket=bucket, Key=key, Body=bts)
+
+
+def _write_chunk(ddb_table, chunk: List[Dict[str, Any]]):
+    with ddb_table.batch_writer() as batch:
+        for rec in chunk:
+            item = {}
+            for k, v in rec.items():
+                val = _to_ddb_safe(v)
+                if val is not None:
+                    item[k] = val
+            item["cve"] = str(item.get("cve") or rec.get("cve")).upper()
+            batch.put_item(Item=item)
+    return len(chunk)
+
+
+def sync_epss_records_to_dynamodb_and_s3(records: List[Dict[str, Any]], json_bytes: bytes, user_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = _resolve_cfg(user_cfg)
+    s3_bucket = cfg.get("S3_BUCKET")
+    s3_prefix = cfg.get("S3_PREFIX")
+    baseline_key = f"{s3_prefix}{cfg['BASELINE_FILENAME']}"
+
+    if not s3_bucket:
+        raise RuntimeError("S3_BUCKET must be set in config/env")
+
+    botocfg = Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 3, "mode": "standard"})
+    s3 = boto3.client("s3", region_name=cfg["AWS_REGION"], config=botocfg)
+    ddb_kwargs = {"region_name": cfg["AWS_REGION"]}
+    if cfg.get("DDB_ENDPOINT"):
+        ddb_kwargs["endpoint_url"] = cfg.get("DDB_ENDPOINT")
+    ddb = boto3.resource("dynamodb", **ddb_kwargs)
+    table = ddb.Table(cfg["TABLE_NAME"])
+
+    # Load existing baseline
+    print(f"🔁 Fetching baseline from s3://{s3_bucket}/{baseline_key}")
+    baseline_text = _s3_get_text_if_exists(s3, s3_bucket, baseline_key)
+    baseline_map = {}
+    if baseline_text:
+        try:
+            baseline_list = json.loads(baseline_text)
+            for item in baseline_list:
+                k = item.get("cve")
+                if k:
+                    baseline_map[k.upper()] = item
+            print(f"ℹ️ Loaded {len(baseline_map)} entries from baseline")
+        except Exception as e:
+            print(f"⚠️ Failed to parse baseline JSON: {e}")
+
+    # Build current map and detect differences
+    current_map = {r["cve"].upper(): r for r in records if r.get("cve")}
+    baseline_serial = {k: _serialize_canonical(v) for k, v in baseline_map.items()}
+    current_serial = {k: _serialize_canonical(v) for k, v in current_map.items()}
+    to_write = [rec for k, rec in current_map.items() if current_serial.get(k) != baseline_serial.get(k)]
+
+    print(f"🚀 Writing {len(to_write)} new/updated records...")
+
+    written = 0
+    chunk_size = cfg["BATCH_WRITE_CHUNK_SIZE"]
+    flush_every = cfg["S3_FLUSH_INTERVAL"]
+
+    lock = threading.Lock()
+
+    def flush_to_s3():
+        baseline_bytes = json.dumps(list(baseline_map.values()), ensure_ascii=False, indent=2).encode("utf-8")
+        try:
+            _s3_put_bytes(s3, s3_bucket, baseline_key, baseline_bytes)
+            print(f"💾 Flushed {len(baseline_map)} baseline records to S3")
+        except Exception as e:
+            print(f"⚠️ Failed to flush to S3: {e}")
+
+    for chunk in _chunks(to_write, chunk_size):
+        _write_chunk(table, chunk)
+        with lock:
+            for rec in chunk:
+                baseline_map[rec["cve"].upper()] = rec
+            written += len(chunk)
+            if written % flush_every == 0:
+                flush_to_s3()
+            if written % cfg["BATCH_PROGRESS_INTERVAL"] == 0 or written == len(to_write):
+                print(f"⬆️ Wrote {written}/{len(to_write)} items")
+
+    flush_to_s3()
+    print(f"✅ Completed sync: {written} written, {len(baseline_map)} total baseline records")
+    return {"written": written, "total_baseline": len(baseline_map)}
