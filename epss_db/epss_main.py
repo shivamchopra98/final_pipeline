@@ -7,7 +7,7 @@ from load import sync_epss_records_to_dynamodb_and_s3
 
 load_dotenv()
 
-RAW_NVD_XZ = "https://github.com/fkie-cad/nvd-json-data-feeds/releases/latest/download/CVE-all.json.xz"
+RAW_NVD_XZ = os.getenv("RAW_NVD_XZ", "https://github.com/fkie-cad/nvd-json-data-feeds/releases/latest/download/CVE-all.json.xz")
 EPSS_API_BASE = os.getenv("EPSS_API_BASE", "https://api.first.org/data/v1/epss?cve=")
 
 EPSS_CONFIG = {
@@ -18,7 +18,6 @@ EPSS_CONFIG = {
     "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
     "BATCH_WRITE_CHUNK_SIZE": int(os.getenv("BATCH_WRITE_CHUNK_SIZE", "1000")),
     "BATCH_PROGRESS_INTERVAL": int(os.getenv("BATCH_PROGRESS_INTERVAL", "500")),
-    "PARALLEL_THREADS": int(os.getenv("PARALLEL_THREADS", "20")),
 }
 
 def main():
@@ -26,7 +25,7 @@ def main():
     s3_prefix = EPSS_CONFIG["S3_PREFIX"]
     baseline_key = f"{s3_prefix}{EPSS_CONFIG['BASELINE_FILENAME']}"
 
-    print("▶️ Starting incremental EPSS ETL (in-memory, no file download)...")
+    print("▶️ Starting incremental EPSS ETL...")
     api_results = extract_epss_data_incremental(
         RAW_NVD_XZ, EPSS_API_BASE, s3_bucket, baseline_key, EPSS_CONFIG["AWS_REGION"], batch_size=100
     )

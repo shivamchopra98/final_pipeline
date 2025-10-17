@@ -6,7 +6,7 @@ load_dotenv()
 
 from extract import download_raw_json_to_text
 from transform import transform_json_text_to_records_and_json_bytes
-from load_metasploit import sync_records_to_dynamodb_and_store_baseline
+from load import sync_records_to_dynamodb_and_store_baseline
 
 RAW_JSON_URL = os.getenv(
     "METASPLOIT_RAW_URL",

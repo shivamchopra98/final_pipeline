@@ -1,33 +1,38 @@
-# transform.py
 import json
-from decimal import Decimal
-from datetime import datetime
+from typing import List, Dict, Tuple, Any
 
-def _decimal_default(obj):
-    if isinstance(obj, Decimal):
-        return float(obj)
-    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
-
-def transform_nvd_items(nvd_items):
+def transform_nvd_json_to_records_and_json_bytes(json_text: str) -> Tuple[List[Dict[str, Any]], bytes]:
     """
-    Transform raw NVD items into normalized records for S3/DynamoDB.
+    Transform the FKIE-CAD NVD JSON feed into a list of CVE records.
+    Compatible with both 'CVE_Items' and 'cve_items' formats.
     """
-    records = []
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    parsed = json.loads(json_text)
+    records: List[Dict[str, Any]] = []
 
-    for item in nvd_items:
+    # Handle both schemas
+    items = parsed.get("CVE_Items") or parsed.get("cve_items") or parsed.get("items") or []
+
+    for item in items:
+        # FKIE format — top-level fields
+        cve_id = item.get("id") or item.get("cve", {}).get("CVE_data_meta", {}).get("ID")
+        if not cve_id:
+            continue
+
         rec = {
-            "id": item.get("id"),
+            "cveID": cve_id,
+            "sourceIdentifier": item.get("sourceIdentifier"),
             "published": item.get("published"),
             "lastModified": item.get("lastModified"),
             "vulnStatus": item.get("vulnStatus"),
-            "descriptions": item.get("descriptions", []),
-            "metrics": item.get("metrics", {}),
-            "references": item.get("references", []),
-            "date_updated": today,
+            "descriptions": item.get("descriptions") or item.get("cve", {}).get("description", {}).get("description_data", []),
+            "metrics": item.get("metrics") or item.get("impact", {}),
+            "weaknesses": item.get("weaknesses", []),
+            "references": item.get("references") or item.get("cve", {}).get("references", {}).get("reference_data", []),
+            "cveTags": item.get("cveTags", []),
         }
+
         records.append(rec)
 
-    json_bytes = json.dumps(records, ensure_ascii=False, indent=2, default=_decimal_default).encode("utf-8")
-    print(f"🔄 Transformed NVD results: {len(records)} records (json {len(json_bytes)} bytes)")
+    json_bytes = json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8")
+    print(f"🔄 Transformed NVD JSON -> records: {len(records)}, json bytes {len(json_bytes)}")
     return records, json_bytes

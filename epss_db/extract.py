@@ -9,7 +9,6 @@ from typing import List, Set, Dict, Any
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-
 def download_nvd_xz_and_extract_cves(xz_url: str, timeout: int = 60) -> List[str]:
     print(f"⬇️ Downloading {xz_url} (in-memory)...")
     resp = requests.get(xz_url, timeout=timeout)
@@ -28,7 +27,6 @@ def download_nvd_xz_and_extract_cves(xz_url: str, timeout: int = 60) -> List[str
     print(f"ℹ️ Extracted {len(cves)} CVEs from NVD file")
     return cves
 
-
 def _s3_get_existing_cves(bucket: str, key: str, region: str) -> Set[str]:
     s3 = boto3.client("s3", region_name=region, config=Config(retries={"max_attempts": 3}))
     try:
@@ -42,7 +40,6 @@ def _s3_get_existing_cves(bucket: str, key: str, region: str) -> Set[str]:
             print("ℹ️ No existing baseline found in S3 (fresh start)")
             return set()
         raise
-
 
 def call_epss_api_for_batch(api_base: str, cve_batch: List[str], session: requests.Session, timeout: int = 30):
     q = ",".join(cve_batch)
@@ -68,7 +65,6 @@ def call_epss_api_for_batch(api_base: str, cve_batch: List[str], session: reques
                 continue
             raise
     return None
-
 
 def extract_epss_data_incremental(xz_url: str, epss_api_base: str, s3_bucket: str, s3_key: str, aws_region: str, batch_size: int = 50):
     """Extract CVEs not yet in S3 baseline and query EPSS only for them."""

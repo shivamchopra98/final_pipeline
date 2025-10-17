@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     "BATCH_PROGRESS_INTERVAL": 100,
 }
 
+
 def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cfg = DEFAULT_CONFIG.copy()
     if user_cfg:
@@ -20,6 +21,7 @@ def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if cfg.get("S3_PREFIX") and not cfg["S3_PREFIX"].endswith("/"):
         cfg["S3_PREFIX"] += "/"
     return cfg
+
 
 def _s3_get_text_if_exists(s3_client, bucket: str, key: str) -> Optional[str]:
     try:
@@ -31,8 +33,10 @@ def _s3_get_text_if_exists(s3_client, bucket: str, key: str) -> Optional[str]:
             return None
         raise
 
+
 def _s3_put_bytes(s3_client, bucket: str, key: str, bts: bytes):
     s3_client.put_object(Bucket=bucket, Key=key, Body=bts)
+
 
 def _to_ddb_safe(v):
     if v is None:
@@ -43,12 +47,17 @@ def _to_ddb_safe(v):
         return json.dumps(v, ensure_ascii=False)
     return str(v)
 
-def sync_misp_records_to_dynamodb_and_s3(records: List[Dict[str, Any]], json_bytes: bytes, user_cfg: Dict[str, Any]) -> Dict[str, Any]:
+
+def sync_misp_records_to_dynamodb_and_s3(
+    records: List[Dict[str, Any]],
+    json_bytes: bytes,
+    user_cfg: Dict[str, Any]
+) -> Dict[str, Any]:
+
     cfg = _resolve_cfg(user_cfg)
     s3_bucket = cfg["S3_BUCKET"]
     s3_prefix = cfg.get("S3_PREFIX", "")
     baseline_key = f"{s3_prefix}{cfg['BASELINE_FILENAME']}"
-
     today = datetime.utcnow().strftime("%Y-%m-%d")  # date-only
 
     if not s3_bucket:
@@ -68,6 +77,7 @@ def sync_misp_records_to_dynamodb_and_s3(records: List[Dict[str, Any]], json_byt
         region_name=cfg.get("AWS_REGION")
     )
 
+    # Create table if missing
     table_name = cfg["TABLE_NAME"]
     existing_tables = ddb.meta.client.list_tables().get("TableNames", [])
     if table_name not in existing_tables:
@@ -99,22 +109,31 @@ def sync_misp_records_to_dynamodb_and_s3(records: List[Dict[str, Any]], json_byt
     else:
         print("ℹ️ No baseline found, first run")
 
+    # Build current map
     current_map: Dict[str, Dict[str, Any]] = {}
     for rec in records:
         uid = rec.get("uuid")
         if uid:
             current_map[str(uid)] = rec
 
+    # --- Compare and find only new or changed records ---
+    def normalize_record(rec: Dict[str, Any]) -> str:
+        """Return a normalized JSON string for stable comparison (ignoring date_updated)."""
+        r = {k: v for k, v in rec.items() if k != "date_updated"}
+        return json.dumps(r, sort_keys=True, ensure_ascii=False)
+
     to_write = []
     for uid, rec in current_map.items():
         base = baseline_map.get(uid)
-        # Update date only if record is new or changed
-        if base is None or rec != base:
+        if base is None:
             rec["date_updated"] = today
             to_write.append(rec)
         else:
-            # preserve existing date_updated
-            rec["date_updated"] = base.get("date_updated", today)
+            if normalize_record(rec) != normalize_record(base):
+                rec["date_updated"] = today
+                to_write.append(rec)
+            else:
+                rec["date_updated"] = base.get("date_updated", today)
 
     print(f"ℹ️ Records to write: {len(to_write)}")
 
