@@ -1,23 +1,15 @@
-# transformations/cisa_transform.py
 """
-CISA transformation (strict final schema with logging):
-- Standardizes field names for consistency
-- Keeps only mapped columns (no extras)
-- Adds detailed logs for traceability
+CISA transformation (strict schema with CVE inclusion)
 """
 
 import logging
 from typing import Dict, Any
+from utils.time_utils import iso_now
 
-# ===========================================================
-# 🧾 Logging Setup
-# ===========================================================
 log = logging.getLogger(__name__)
 
-# ===========================================================
-# 🎯 Final Schema Columns
-# ===========================================================
 CISA_FINAL_COLUMNS = [
+    "cve_id",
     "vendor_project",
     "product",
     "vulnerability_name",
@@ -27,37 +19,24 @@ CISA_FINAL_COLUMNS = [
     "known_ransomware_use",
     "notes",
     "cwes",
+    "uploaded_date",
 ]
 
-# ===========================================================
-# 🧩 Utility Helper
-# ===========================================================
+
 def _get_field(record: Dict[str, Any], names):
-    """Return the first matching field value from the record."""
     for n in names:
         if n in record:
             return record[n]
     return None
 
 
-# ===========================================================
-# 🧱 Transformation Logic
-# ===========================================================
 def clean_and_rename(record: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Cleans and renames CISA fields.
-    Retains only the standardized schema fields (no unmapped fields).
-    """
     out: Dict[str, Any] = {}
 
-    # --- Primary key standardization ---
-    cve = _get_field(record, ["CVE ID", "cveID", "cve_id", "CVE"])
-    if cve:
-        out["cve_id"] = cve
-    else:
-        log.debug("⚠️ Missing CVE ID in CISA record")
+    # Always include CVE
+    cve = _get_field(record, ["cveID", "cve_id", "CVE"])
+    out["cve_id"] = cve
 
-    # --- Define strict rename map ---
     rename_map = {
         "vendorProject": "vendor_project",
         "product": "product",
@@ -70,20 +49,15 @@ def clean_and_rename(record: Dict[str, Any]) -> Dict[str, Any]:
         "cwes": "cwes",
     }
 
-    # --- Apply rename mapping (strict mode) ---
     for old, new in rename_map.items():
         val = _get_field(record, [old])
         if val is not None:
             out[new] = val
-            log.debug(f"🪶 Renamed field '{old}' → '{new}'")
 
-    # --- Retain only fields from final schema ---
-    strict_output = {k: out.get(k) for k in CISA_FINAL_COLUMNS if k in out or k == "cve_id"}
+    out["uploaded_date"] = iso_now()
 
-    # --- Log summary ---
-    if "cve_id" in strict_output:
-        log.debug(f"✅ Transformed CISA record for CVE {strict_output['cve_id']}")
-    else:
-        log.debug("⚠️ Skipped CISA record (missing CVE ID)")
+    # fill missing fields with None
+    for col in CISA_FINAL_COLUMNS:
+        out.setdefault(col, None)
 
-    return strict_output
+    return out
