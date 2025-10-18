@@ -2,47 +2,81 @@
 import concurrent.futures
 from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
-
-import concurrent.futures
 import logging
-from boto3.dynamodb.conditions import Attr
+import boto3
+from utils.time_utils import iso_now
 
-def parallel_scan(table, log: logging.Logger, total_segments: int = 8, filter_expr=None):
-    """
-    Perform a parallel DynamoDB scan with optional filter expression.
-    - `filter_expr`: optional DynamoDB filter (e.g. Attr("uploaded_date").gt("2025-10-01T00:00:00Z"))
-    - Returns merged list of items.
-    """
-    log.info(f"⚡ Scanning {table.name} (segments={total_segments})")
 
-    def scan_segment(segment):
-        seg_items = []
-        scan_kwargs = {
-            "Segment": segment,
-            "TotalSegments": total_segments,
-        }
+def parallel_scan(table, total_segments=8, filter_expr=None, log=None):
+    """Parallel scan helper for DynamoDB."""
+    log = log or logging.getLogger("vuln-sync")
+    from concurrent.futures import ThreadPoolExecutor
 
-        # ✅ Add filter only if provided
+    def scan_segment(seg):
+        params = {"Segment": seg, "TotalSegments": total_segments}
         if filter_expr is not None:
-            scan_kwargs["FilterExpression"] = filter_expr
+            params["FilterExpression"] = filter_expr
 
-        response = table.scan(**scan_kwargs)
-        seg_items.extend(response.get("Items", []))
+        items = []
+        resp = table.scan(**params)
+        items.extend(resp.get("Items", []))
+        while "LastEvaluatedKey" in resp:
+            resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **params)
+            items.extend(resp.get("Items", []))
+        return items
 
-        while "LastEvaluatedKey" in response:
-            scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
-            response = table.scan(**scan_kwargs)
-            seg_items.extend(response.get("Items", []))
-
-        return seg_items
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=total_segments) as ex:
+    with ThreadPoolExecutor(max_workers=total_segments) as ex:
         results = list(ex.map(scan_segment, range(total_segments)))
 
-    merged = [item for seg in results for item in seg]
-    log.info(f"📦 Scan complete for {table.name}: {len(merged)} items")
+    all_items = [item for sub in results for item in sub]
+    log.info(f"📦 Scan complete for {table.name}: {len(all_items)} items")
+    return all_items
 
-    return merged
+
+def get_max_uploaded_date(dynamodb, table_name: str, log) -> str:
+    """
+    Fetch max(uploaded_date) or max(date_updated) efficiently.
+    Falls back to table scan if no sort key-based index exists.
+
+    Automatically detects column:
+    - For NVD → uses 'date_updated'
+    - For others → uses 'uploaded_date'
+    """
+    table = dynamodb.Table(table_name)
+    column = "date_updated" if "nvd" in table_name else "uploaded_date"
+
+    log.info(f"📊 Fetching max({column}) from {table_name} using scan()")
+
+    try:
+        # Use a lightweight projection to fetch only date fields
+        resp = table.scan(
+            FilterExpression=Attr(column).gt("1970-01-01T00:00:00Z"),
+            ProjectionExpression=column
+        )
+
+        items = resp.get("Items", [])
+        while "LastEvaluatedKey" in resp:
+            resp = table.scan(
+                FilterExpression=Attr(column).gt("1970-01-01T00:00:00Z"),
+                ProjectionExpression=column,
+                ExclusiveStartKey=resp["LastEvaluatedKey"]
+            )
+            items.extend(resp.get("Items", []))
+
+        if not items:
+            log.warning(f"⚠️ No {column} values found in {table_name}. Using current time.")
+            from utils.time_utils import iso_now
+            return iso_now()
+
+        max_date = max(i[column] for i in items if column in i)
+        log.info(f"✅ Max {column} for {table_name}: {max_date}")
+        return max_date
+
+    except Exception as e:
+        log.error(f"❌ Failed to get max({column}) for {table_name}: {e}")
+        from utils.time_utils import iso_now
+        return iso_now()
+
 
 
 def build_update_expression_and_values(attr_map: dict, timestamp: str):

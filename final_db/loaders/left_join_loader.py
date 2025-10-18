@@ -3,7 +3,7 @@ import logging
 import concurrent.futures
 from boto3.dynamodb.conditions import Attr
 from utils.time_utils import iso_now
-from utils.dynamo_helpers import parallel_scan
+from utils.dynamo_helpers import parallel_scan, get_max_uploaded_date
 from utils.cve_utils import normalize_cve
 
 
@@ -22,26 +22,21 @@ def left_join_source(
     """
     Left-join a source table (CISA, ExploitDB, Metasploit) onto NVD-based final table.
 
-    ✅ Improvements:
-      - Safe handling of DynamoDB reserved keywords via ExpressionAttributeNames
-      - Fills missing columns with None for schema consistency
-      - Skips updating partition key (cve_id)
-      - Only updates CVEs already existing in NVD
-      - Parallel updates with thread pool
-      - Updates metadata.last_sync_time after completion
+    ✅ Features:
+    - Incremental join (uploaded_date > last_sync)
+    - Skips non-matching CVEs
+    - Fills missing fields with None
+    - Handles reserved DynamoDB keywords safely
+    - Updates metadata with max(uploaded_date)
     """
     log = log or logging.getLogger("vuln-sync")
     source_table = dynamodb.Table(source_table_name)
 
-    # ==============================================================
-    # 🕓 Step 1: Get last sync timestamp from metadata table
-    # ==============================================================
+    # Step 1️⃣ — Get last sync
     last_sync = get_last_sync_fn(source_table_name)
     log.info(f"🔗 Left-joining {source_table_name} (last_sync={last_sync})")
 
-    # ==============================================================
-    # ⚡ Step 2: Incremental scan for new/updated items
-    # ==============================================================
+    # Step 2️⃣ — Incremental scan
     log.info(f"⚡ Scanning {source_table_name} for records with uploaded_date > {last_sync}...")
     items = parallel_scan(
         source_table,
@@ -56,13 +51,10 @@ def left_join_source(
 
     log.info(f"📦 Found {len(items)} new/updated records in {source_table_name}.")
 
-    # ==============================================================
-    # 🧱 Step 3: Process each item & left join on cve_id
-    # ==============================================================
     updated = 0
-    debug_print_limit = 5  # print only first 5 updates for visibility
+    debug_print_limit = 5
 
-    # Infer schema from one sample record
+    # Discover schema fields dynamically
     try:
         sample_transformed = transform_fn(items[0])
         final_columns = list(sample_transformed.keys())
@@ -74,7 +66,6 @@ def left_join_source(
         raw_cve = rec.get("cve_id") or rec.get(source_join_key) or rec.get("CVE") or rec.get("cveID")
         cve_id = normalize_cve(raw_cve)
 
-        # Skip if no valid CVE or not in base NVD set
         if not cve_id or cve_id not in nvd_cve_set:
             return False
 
@@ -84,23 +75,20 @@ def left_join_source(
 
         transformed.pop("uploaded_date", None)
 
-        # Ensure all expected fields are present
+        # Fill missing columns with None
         for col in final_columns:
             transformed.setdefault(col, None)
 
-        # Build safe DynamoDB update expression
+        # Build safe update expression
         update_expr = []
         expr_attr_values = {}
         expr_attr_names = {}
 
         for k, v in transformed.items():
             if k == "cve_id":
-                continue  # never update primary key
-
-            # handle DynamoDB reserved keywords safely
+                continue
             name_placeholder = f"#attr_{k}"
             value_placeholder = f":{k}"
-
             expr_attr_names[name_placeholder] = k
             expr_attr_values[value_placeholder] = v
             update_expr.append(f"{name_placeholder} = {value_placeholder}")
@@ -126,16 +114,12 @@ def left_join_source(
             log.error(f"❌ Error updating CVE {cve_id} from {source_table_name}: {e}")
             return False
 
-    # ==============================================================
-    # ⚙️ Step 4: Run in parallel threads
-    # ==============================================================
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
         list(ex.map(process_item, items))
 
     log.info(f"✅ Left-join complete for {source_table_name}: updated {updated} items.")
 
-    # ==============================================================
-    # 🕒 Step 5: Update last_sync time in metadata
-    # ==============================================================
-    set_last_sync_fn(source_table_name, iso_now())
-    log.info(f"🕓 Updated metadata last_sync for {source_table_name}.")
+    # Step 3️⃣ — Update metadata with true max(uploaded_date)
+    max_uploaded = get_max_uploaded_date(dynamodb, source_table_name, log)
+    set_last_sync_fn(source_table_name, max_uploaded)
+    log.info(f"🕓 Stored max(uploaded_date) = {max_uploaded} for {source_table_name}")

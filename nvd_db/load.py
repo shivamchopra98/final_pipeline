@@ -1,6 +1,6 @@
 import json
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
@@ -25,7 +25,7 @@ def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _to_ddb_safe(v):
-    """Convert Python value into a DynamoDB-storable string."""
+    """Convert Python value into a DynamoDB-storable format."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -126,14 +126,16 @@ def sync_nvd_records_to_dynamodb(records: List[Dict[str, Any]], json_bytes: byte
         print("✅ No new data to update.")
         return {"total_feed_records": len(records), "new_records": 0}
 
-    # --- Batch write ---
+    # --- Batch write with date_updated field ---
     written = 0
     batch_size = cfg.get("BATCH_WRITE_CHUNK_SIZE", 200)
+    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     with table.batch_writer(overwrite_by_pkeys=["id"]) as batch:
         for i, rec in enumerate(new_records, start=1):
             item = {k: _to_ddb_safe(v) for k, v in rec.items()}
             item["id"] = rec.get("cveID") or rec.get("id")
+            item["date_updated"] = now_date  # ⏰ Add/overwrite ETL update timestamp
             batch.put_item(Item=item)
 
             if i % batch_size == 0:
@@ -142,5 +144,9 @@ def sync_nvd_records_to_dynamodb(records: List[Dict[str, Any]], json_bytes: byte
             written = i
 
     print(f"✅ DynamoDB load complete: {written} records written/updated.")
-    summary = {"total_feed_records": len(records), "new_records": written}
+    summary = {
+        "total_feed_records": len(records),
+        "new_records": written,
+        "last_updated_time": now_iso,
+    }
     return summary
