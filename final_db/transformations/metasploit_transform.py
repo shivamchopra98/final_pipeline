@@ -1,23 +1,15 @@
-# transformations/metasploit_transform.py
 """
-Metasploit transformation (strict final schema with logging):
-- Keeps only mapped final columns (no extras)
-- Normalizes common source field names into final names
-- Adds debug logs for renames and missing primary key
+Metasploit transformation (strict schema with CVE inclusion)
 """
 
 import logging
 from typing import Dict, Any, Optional
+from utils.time_utils import iso_now
 
-# ===========================================================
-# 🧾 Logging Setup
-# ===========================================================
 log = logging.getLogger(__name__)
 
-# ===========================================================
-# 🎯 Final Schema Columns
-# ===========================================================
 METASPLOIT_FINAL_COLUMNS = [
+    "cve_id",
     "metasploit_module_name",
     "metasploit_ref_name",
     "metasploit_fullname",
@@ -31,44 +23,30 @@ METASPLOIT_FINAL_COLUMNS = [
     "autofilter_services",
     "rport",
     "metasploit_path",
-
+    "uploaded_date",
 ]
 
-# ===========================================================
-# 🧩 Utility helper
-# ===========================================================
+
 def _get_field(record: Dict[str, Any], names) -> Optional[Any]:
-    """Return the first matching field value from the record."""
     for n in names:
         if n in record:
             return record[n]
     return None
 
 
-# ===========================================================
-# 🧱 Transformation
-# ===========================================================
 def clean_and_rename(record: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Transform a Metasploit record into the strict final schema.
-    Only final columns are retained; unmapped source fields are ignored.
-    """
     out: Dict[str, Any] = {}
 
-    # Primary identifier (use metasploit_name as the canonical key)
-    name = _get_field(record, ["name", "module", "ref_name", "refname", "module_name"])
-    if name is not None:
-        out["metasploit_name"] = name
-    else:
-        log.debug("⚠️ Missing metasploit_name in Metasploit record")
+    # Include CVE
+    cve = _get_field(record, ["CVE", "cve_id", "cveID"])
+    out["cve_id"] = cve
 
-    # Mapping of final fields to candidate source keys
     mapping = {
-        "fullname": "metasploit_fullname",
+        "name": "metasploit_module_name",
         "ref_name": "metasploit_ref_name",
-        "module_name": "metasploit_module_name",
+        "fullname": "metasploit_fullname",
         "aliases": "metasploit_aliases",
-        "rank": "rank",
+        "rank": "metasploit_rank",
         "type": "metasploit_type",
         "author": "metasploit_author",
         "description": "metasploit_description",
@@ -79,19 +57,14 @@ def clean_and_rename(record: Dict[str, Any]) -> Dict[str, Any]:
         "path": "metasploit_path",
     }
 
-    for final_key, candidates in mapping.items():
-        val = _get_field(record, candidates)
+    for old, new in mapping.items():
+        val = _get_field(record, [old])
         if val is not None:
-            out[final_key] = val
-            log.debug(f"🪶 Mapped Metasploit field {candidates} → '{final_key}'")
+            out[new] = val
 
-    # Ensure strict output contains exactly the final columns (values may be None)
-    strict_output: Dict[str, Optional[Any]] = {k: out.get(k) for k in METASPLOIT_FINAL_COLUMNS}
+    out["uploaded_date"] = iso_now()
 
-    # Log summary
-    if strict_output.get("metasploit_name"):
-        log.debug(f"✅ Transformed Metasploit record metasploit_name={strict_output['metasploit_name']}")
-    else:
-        log.debug("⚠️ Transformed Metasploit record without metasploit_name (will be skipped upstream if required)")
+    for col in METASPLOIT_FINAL_COLUMNS:
+        out.setdefault(col, None)
 
-    return strict_output
+    return out

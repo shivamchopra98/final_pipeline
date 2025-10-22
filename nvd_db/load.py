@@ -1,5 +1,6 @@
 import json
-from datetime import datetime
+import concurrent.futures
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
@@ -10,6 +11,7 @@ DEFAULT_CONFIG = {
     "BATCH_WRITE_CHUNK_SIZE": 200,
     "AWS_REGION": "us-east-1",
     "DDB_ENDPOINT": "",
+    "PARALLEL_SCAN_SEGMENTS": 8
 }
 
 def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -19,6 +21,7 @@ def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return cfg
 
 def _to_ddb_safe(v):
+    """Convert Python value into a DynamoDB-storable format."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -27,7 +30,9 @@ def _to_ddb_safe(v):
         return json.dumps(v, ensure_ascii=False)
     return str(v)
 
-def _parse_date_obj(s: Optional[str]):
+
+def _parse_date_obj(s: Optional[str]) -> Optional[datetime]:
+    """Parse ISO date safely."""
     if not s:
         return None
     try:
@@ -35,53 +40,102 @@ def _parse_date_obj(s: Optional[str]):
     except Exception:
         return None
 
-def _max_date_from_ddb_table(table, date_field="lastModified") -> Optional[datetime]:
-    paginator = table.meta.client.get_paginator("scan")
-    max_dt = None
-    for page in paginator.paginate(TableName=table.name, ProjectionExpression=date_field):
-        for itm in page.get("Items", []):
-            val = itm.get(date_field)
-            if not val:
-                continue
-            dt = _parse_date_obj(val)
-            if dt and (max_dt is None or dt > max_dt):
-                max_dt = dt
-    return max_dt
+def _get_max_last_modified_parallel(table, segments=8) -> Optional[datetime]:
+    """Parallel scan DynamoDB to find the maximum 'lastModified' date."""
+    client = table.meta.client
+
+    def scan_segment(segment):
+        paginator = client.get_paginator("scan")
+        max_dt = None
+        for page in paginator.paginate(
+            TableName=table.name,
+            ProjectionExpression="lastModified",
+            TotalSegments=segments,
+            Segment=segment
+        ):
+            for item in page.get("Items", []):
+                val = item.get("lastModified")
+                if not val:
+                    continue
+                dt = _parse_date_obj(val)
+                if dt and (max_dt is None or dt > max_dt):
+                    max_dt = dt
+        return max_dt
+
+    print(f"🚀 Performing parallel scan with {segments} segments for max 'lastModified'...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=segments) as executor:
+        results = list(executor.map(scan_segment, range(segments)))
+
+    max_date = max((r for r in results if r is not None), default=None)
+    if max_date:
+        print(f"✅ Parallel scan complete. Max 'lastModified' = {max_date}")
+    else:
+        print("ℹ️ No 'lastModified' found in table.")
+    return max_date
 
 def sync_nvd_records_to_dynamodb(records: List[Dict[str, Any]], json_bytes: bytes, user_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Sync NVD feed data to DynamoDB (insert/update new and modified records)."""
     cfg = _resolve_cfg(user_cfg)
     ddb_kwargs = {"region_name": cfg.get("AWS_REGION")}
     if cfg.get("DDB_ENDPOINT"):
         ddb_kwargs["endpoint_url"] = cfg.get("DDB_ENDPOINT")
 
-    ddb = boto3.resource("dynamodb", **ddb_kwargs)
-    table_name = cfg.get("TABLE_NAME")
-    table = ddb.Table(table_name)
+    table_name = cfg["TABLE_NAME"]
+    existing_tables = ddb.meta.client.list_tables().get("TableNames", [])
+    if table_name not in existing_tables:
+        print(f"⚡ Creating DynamoDB table '{table_name}'...")
+        table = ddb.create_table(
+            TableName=table_name,
+            KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
+            ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
+        )
+        table.meta.client.get_waiter("table_exists").wait(TableName=table_name)
+        print("✅ Table created.")
+    else:
+        table = ddb.Table(table_name)
 
-    print(f"🔁 Checking latest 'lastModified' in DynamoDB table '{table_name}' ...")
-    max_date = _max_date_from_ddb_table(table, "lastModified")
-    print(f"ℹ️ Current max 'lastModified': {max_date.isoformat() if max_date else 'None'}")
+    # --- Find max 'lastModified' using parallel scan ---
+    max_date = _get_max_last_modified_parallel(
+        table, segments=cfg.get("PARALLEL_SCAN_SEGMENTS", 8)
+    )
 
-    to_write, skipped = [], 0
-    for rec in records:
-        rec_date = _parse_date_obj(rec.get("lastModified"))
-        if not max_date or (rec_date and rec_date > max_date):
-            to_write.append(rec)
-        else:
-            skipped += 1
+    # --- Filter new/updated records ---
+    if max_date:
+        new_records = [
+            rec for rec in records
+            if (dt := _parse_date_obj(rec.get("lastModified"))) and dt > max_date
+        ]
+        print(f"🆕 Found {len(new_records)} new/updated records since {max_date}")
+    else:
+        new_records = records
+        print(f"🆕 First run detected — inserting all {len(new_records)} records.")
 
-    print(f"🟡 New or updated: {len(to_write)}, Skipped: {skipped}")
+    if not new_records:
+        print("✅ No new data to update.")
+        return {"total_feed_records": len(records), "new_records": 0}
+
+    # --- Batch write with date_updated field ---
     written = 0
     batch_size = cfg.get("BATCH_WRITE_CHUNK_SIZE", 200)
+    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    for i in range(0, len(to_write), batch_size):
-        chunk = to_write[i:i + batch_size]
-        with table.batch_writer() as batch:
-            for rec in chunk:
-                item = {k: _to_ddb_safe(v) for k, v in rec.items() if v is not None}
-                batch.put_item(Item=item)
-                written += 1
-        print(f"⬆️ Batch uploaded {min(i+batch_size, len(to_write))}/{len(to_write)}")
+    with table.batch_writer(overwrite_by_pkeys=["id"]) as batch:
+        for i, rec in enumerate(new_records, start=1):
+            item = {k: _to_ddb_safe(v) for k, v in rec.items()}
+            item["id"] = rec.get("cveID") or rec.get("id")
+            item["date_updated"] = now_date  # ⏰ Add/overwrite ETL update timestamp
+            batch.put_item(Item=item)
 
-    print(f"✅ DynamoDB sync complete. Written={written}, Skipped={skipped}")
-    return {"total_feed_records": len(records), "written": written, "skipped": skipped}
+            if i % batch_size == 0:
+                print(f"⬆️ Wrote {i} records...")
+
+            written = i
+
+    print(f"✅ DynamoDB load complete: {written} records written/updated.")
+    summary = {
+        "total_feed_records": len(records),
+        "new_records": written,
+        "last_updated_time": now_iso,
+    }
+    return summary
