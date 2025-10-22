@@ -10,15 +10,19 @@ DEFAULT_CONFIG = {
     "BATCH_PROGRESS_INTERVAL": 200,
     "BATCH_WRITE_CHUNK_SIZE": 200,
     "AWS_REGION": "us-east-1",
+    "AWS_ACCESS_KEY_ID": None,
+    "AWS_SECRET_ACCESS_KEY": None,
     "DDB_ENDPOINT": "",
     "PARALLEL_SCAN_SEGMENTS": 8
 }
+
 
 def _resolve_cfg(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cfg = DEFAULT_CONFIG.copy()
     if user_cfg:
         cfg.update(user_cfg)
     return cfg
+
 
 def _to_ddb_safe(v):
     """Convert Python value into a DynamoDB-storable format."""
@@ -36,9 +40,13 @@ def _parse_date_obj(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return datetime.strptime(s, "%Y-%m-%dT%H:%MZ")
     except Exception:
-        return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
 
 def _get_max_last_modified_parallel(table, segments=8) -> Optional[datetime]:
     """Parallel scan DynamoDB to find the maximum 'lastModified' date."""
@@ -73,12 +81,15 @@ def _get_max_last_modified_parallel(table, segments=8) -> Optional[datetime]:
         print("ℹ️ No 'lastModified' found in table.")
     return max_date
 
+
 def sync_nvd_records_to_dynamodb(records: List[Dict[str, Any]], json_bytes: bytes, user_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Sync NVD feed data to DynamoDB (insert/update new and modified records)."""
     cfg = _resolve_cfg(user_cfg)
+
     ddb_kwargs = {"region_name": cfg.get("AWS_REGION")}
     if cfg.get("DDB_ENDPOINT"):
         ddb_kwargs["endpoint_url"] = cfg.get("DDB_ENDPOINT")
+    ddb = boto3.resource("dynamodb", **ddb_kwargs)
 
     table_name = cfg["TABLE_NAME"]
     existing_tables = ddb.meta.client.list_tables().get("TableNames", [])
