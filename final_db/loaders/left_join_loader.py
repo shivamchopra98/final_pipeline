@@ -22,7 +22,7 @@ def left_join_source(
     """
     Left-join a source table (CISA, ExploitDB, Metasploit) onto NVD-based final table.
 
-    ✅ Features:
+     Features:
     - Incremental join (uploaded_date > last_sync)
     - Skips non-matching CVEs
     - Fills missing fields with None
@@ -32,12 +32,12 @@ def left_join_source(
     log = log or logging.getLogger("vuln-sync")
     source_table = dynamodb.Table(source_table_name)
 
-    # Step 1️⃣ — Get last sync
+    # Step 1️ — Get last sync
     last_sync = get_last_sync_fn(source_table_name)
-    log.info(f"🔗 Left-joining {source_table_name} (last_sync={last_sync})")
+    log.info(f" Left-joining {source_table_name} (last_sync={last_sync})")
 
-    # Step 2️⃣ — Incremental scan
-    log.info(f"⚡ Scanning {source_table_name} for records with uploaded_date > {last_sync}...")
+    # Step 2️ — Incremental scan
+    log.info(f" Scanning {source_table_name} for records with uploaded_date > {last_sync}...")
     items = parallel_scan(
         source_table,
         log=log,
@@ -46,10 +46,10 @@ def left_join_source(
     )
 
     if not items:
-        log.info(f"✅ No new or updated records found for {source_table_name}.")
+        log.info(f" No new or updated records found for {source_table_name}.")
         return
 
-    log.info(f"📦 Found {len(items)} new/updated records in {source_table_name}.")
+    log.info(f" Found {len(items)} new/updated records in {source_table_name}.")
 
     updated = 0
     debug_print_limit = 5
@@ -105,21 +105,21 @@ def left_join_source(
             )
 
             if updated < debug_print_limit:
-                log.info(f"🧩 Updated CVE {cve_id} — fields: {list(transformed.keys())}")
+                log.info(f" Updated CVE {cve_id} — fields: {list(transformed.keys())}")
 
             updated += 1
             return True
 
         except Exception as e:
-            log.error(f"❌ Error updating CVE {cve_id} from {source_table_name}: {e}")
+            log.error(f" Error updating CVE {cve_id} from {source_table_name}: {e}")
             return False
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
         list(ex.map(process_item, items))
 
-    log.info(f"✅ Left-join complete for {source_table_name}: updated {updated} items.")
+    log.info(f" Left-join complete for {source_table_name}: updated {updated} items.")
 
-    # Step 3️⃣ — Update metadata with true max(uploaded_date)
+    # Step 3️ — Update metadata with true max(uploaded_date)
     max_uploaded = get_max_uploaded_date(dynamodb, source_table_name, log)
     set_last_sync_fn(source_table_name, max_uploaded)
-    log.info(f"🕓 Stored max(uploaded_date) = {max_uploaded} for {source_table_name}")
+    log.info(f" Stored max(uploaded_date) = {max_uploaded} for {source_table_name}")

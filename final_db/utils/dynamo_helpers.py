@@ -29,7 +29,7 @@ def parallel_scan(table, total_segments=8, filter_expr=None, log=None):
         results = list(ex.map(scan_segment, range(total_segments)))
 
     all_items = [item for sub in results for item in sub]
-    log.info(f"📦 Scan complete for {table.name}: {len(all_items)} items")
+    log.info(f" Scan complete for {table.name}: {len(all_items)} items")
     return all_items
 
 
