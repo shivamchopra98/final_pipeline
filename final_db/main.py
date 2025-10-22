@@ -11,17 +11,17 @@ from loaders.left_join_loader import left_join_source
 
 def run_pipeline(test_limit: int | None = None):
     log = setup_logging()
-    log.info("🚀 Starting Vulnerability Sync (LEFT JOIN MODE)")
+    log.info(" Starting Vulnerability Sync (LEFT JOIN MODE)")
 
     # ==========================================================
-    # ⚙️ AWS DynamoDB Setup with connection pooling and retries
+    #  AWS DynamoDB Setup with connection pooling and retries
     # ==========================================================
     config = Config(
         region_name=REGION,
-        max_pool_connections=50,  # ✅ increase connection pool for concurrent operations
+        max_pool_connections=50,  #  increase connection pool for concurrent operations
         retries={
             "max_attempts": 5,
-            "mode": "adaptive"  # ✅ smart retry mode (backoff)
+            "mode": "adaptive"  #  smart retry mode (backoff)
         }
     )
 
@@ -30,7 +30,7 @@ def run_pipeline(test_limit: int | None = None):
     metadata_table = dynamodb.Table(METADATA_TABLE)
 
     # ==========================================================
-    # 🧱 Phase A — Load NVD as base table
+    #  Phase A — Load NVD as base table
     # ==========================================================
     nvd_cves = load_nvd_base(
         dynamodb,
@@ -43,7 +43,7 @@ def run_pipeline(test_limit: int | None = None):
     )
 
     # ==========================================================
-    # 🔗 Phase B — Left join all other sources sequentially
+    #  Phase B — Left join all other sources sequentially
     # ==========================================================
     for table_name, join_key, transform in SOURCE_SPECS:
         left_join_source(
@@ -58,7 +58,7 @@ def run_pipeline(test_limit: int | None = None):
             log=log
         )
 
-    log.info("🎯 All sources left-joined successfully.")
+    log.info(" All sources left-joined successfully.")
 
 
 if __name__ == "__main__":

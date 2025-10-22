@@ -24,12 +24,12 @@ def load_nvd_base(
     log = logging.getLogger("vuln-sync")
     nvd_table = dynamodb.Table(nvd_table_name)
 
-    # Step 1️⃣ — Get last sync
+    # Step 1️ — Get last sync
     last_sync = get_last_sync_fn(nvd_table_name)
-    log.info(f"📅 Last sync time for {nvd_table_name}: {last_sync}")
+    log.info(f" Last sync time for {nvd_table_name}: {last_sync}")
 
-    # Step 2️⃣ — Scan new/updated items (date_updated-based)
-    log.info(f"⚡ Scanning {nvd_table_name} for records with date_updated > {last_sync}...")
+    # Step 2️ — Scan new/updated items (date_updated-based)
+    log.info(f" Scanning {nvd_table_name} for records with date_updated > {last_sync}...")
     new_items = parallel_scan(
         nvd_table,
         log=log,
@@ -38,15 +38,15 @@ def load_nvd_base(
 
     if limit:
         new_items = new_items[:limit]
-        log.info(f"🧪 Testing mode — limiting to {limit} NVD items")
+        log.info(f" Testing mode — limiting to {limit} NVD items")
 
     if not new_items:
-        log.info("✅ No new or updated NVD records found. Skipping load.")
+        log.info(" No new or updated NVD records found. Skipping load.")
         return set()
 
-    log.info(f"📦 Found {len(new_items)} new or updated NVD records.")
+    log.info(f" Found {len(new_items)} new or updated NVD records.")
 
-    # Step 3️⃣ — Write to final table
+    # Step 3️ — Write to final table
     cve_ids = set()
     written = 0
 
@@ -65,13 +65,13 @@ def load_nvd_base(
             written += 1
 
             if written % 1000 == 0:
-                log.info(f"📝 Written {written} NVD base rows")
+                log.info(f" Written {written} NVD base rows")
 
-    log.info(f"✅ NVD base load complete: {written} new records written.")
+    log.info(f" NVD base load complete: {written} new records written.")
 
-    # Step 4️⃣ — Compute max(date_updated)
+    # Step 4️ — Compute max(date_updated)
     max_date = get_max_uploaded_date(dynamodb, nvd_table_name, log)
     set_last_sync_fn(nvd_table_name, max_date)
-    log.info(f"🕓 Stored max(date_updated) = {max_date} for {nvd_table_name}")
+    log.info(f" Stored max(date_updated) = {max_date} for {nvd_table_name}")
 
     return cve_ids

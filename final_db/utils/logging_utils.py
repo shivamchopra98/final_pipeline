@@ -13,5 +13,5 @@ def setup_logging():
         ],
     )
     log = logging.getLogger("vuln-sync")
-    log.info(f"📄 Logs will be saved to {log_filename}")
+    log.info(f" Logs will be saved to {log_filename}")
     return log
