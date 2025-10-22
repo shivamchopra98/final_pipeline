@@ -147,6 +147,6 @@ def sync_nvd_records_to_dynamodb(records: List[Dict[str, Any]], json_bytes: byte
     summary = {
         "total_feed_records": len(records),
         "new_records": written,
-        "last_updated_time": now_iso,
+        "last_updated_time": now_date,
     }
     return summary
