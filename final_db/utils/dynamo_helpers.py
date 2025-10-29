@@ -109,3 +109,29 @@ def get_last_sync(metadata_table, source_name):
 
 def set_last_sync(metadata_table, source_name, timestamp):
     metadata_table.put_item(Item={"source_table": source_name, "last_sync_time": timestamp})
+
+def get_all_cve_ids(dynamodb, table_name, log=None, total_segments=8):
+    """
+    Scan the given DynamoDB table to collect all CVE IDs.
+    Used for left joins to ensure we match existing final data.
+    """
+    from boto3.dynamodb.conditions import Key, Attr
+    import botocore
+    import time
+
+    log = log or logging.getLogger("vuln-sync")
+    table = dynamodb.Table(table_name)
+    log.info(f"🧩 Scanning {table_name} to collect all CVE IDs...")
+
+    items = []
+    try:
+        from utils.dynamo_helpers import parallel_scan
+        all_records = parallel_scan(table, log=log, total_segments=total_segments)
+        items = [r["cve_id"] for r in all_records if "cve_id" in r]
+    except botocore.exceptions.ClientError as e:
+        log.error(f"❌ Error collecting CVE IDs from {table_name}: {e}")
+    except Exception as e:
+        log.error(f"⚠️ Unexpected error scanning {table_name}: {e}")
+
+    log.info(f"📦 Found {len(items)} CVE IDs in {table_name}.")
+    return set(items)

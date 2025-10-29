@@ -12,15 +12,23 @@ METADATA_TABLE = "infoservices-cybersecurity-vuln-sync-metadata"
 # Regex for validating CVE IDs (e.g., CVE-2022-30190)
 CVE_PATTERN = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
-# Source tables with mapping to transformation functions
+# ==========================================================
+# Source Tables → Transformation Mapping
+# ==========================================================
 from transformations import (
     cisa_transform,
     exploitdb_transform,
     metasploit_transform,
 )
 
+from transformations.static_data import (
+    apt_transform,
+)
+
+# Each entry: (table_name, join_key, transform_fn, is_static)
 SOURCE_SPECS = [
-    ("infoservices-cybersecurity-cisa-data", "cveID", cisa_transform.clean_and_rename),
-    ("infoservices-cybersecurity-vuln-exploitdb-data", "CVE_id", exploitdb_transform.clean_and_rename),
-    ("infoservices-cybersecurity-vuln-metasploit-data", "cve_id", metasploit_transform.clean_and_rename),
+    # ("infoservices-cybersecurity-cisa-data", "cveID", cisa_transform.clean_and_rename, False),
+    # ("infoservices-cybersecurity-vuln-exploitdb-data", "CVE_id", exploitdb_transform.clean_and_rename, False),
+    # ("infoservices-cybersecurity-vuln-metasploit-data", "cve_id", metasploit_transform.clean_and_rename, False),
+    ("infoservices-cybersecurity-vuln-static-APTfinal", "CVE_Exploited", apt_transform.clean_and_rename, True),  # ✅ static source
 ]
