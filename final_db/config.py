@@ -30,7 +30,19 @@ from transformations.static_data import (
     exploitkit_transform,
     ibm_merged_transform,
     intruder_transform,
-    packet_output_transform# ✅ add this
+    packet_output_transform,
+    packetalone_transform,
+ransomware_data_transform,
+top10_ransomware_transform,
+threat_information1_transform,
+threat_information2_transform,
+threat_information3_transform,
+threat_information4_transform,
+threat_information5_transform,
+mcafeeoutput_data1_transform,
+mcafeeoutput_data2_transform,
+mcafeeoutput_data3_transform,
+packetstorm_exploits_transform
 )
 
 
@@ -51,7 +63,17 @@ SOURCE_SPECS = [
     ("infoservices-cybersecurity-vuln-static-ibm-merged-data", "CVE", ibm_merged_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-intruder-data", "CVE ID", intruder_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-packet-output", "cve_id", packet_output_transform.clean_and_rename, True),
-
+    # ("infoservices-cybersecurity-vuln-static-packetalone-output", "cve_id", packetalone_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-ransomware", "CVE", ransomware_data_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-threat-information1", "CVE", threat_information1_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-threat-information2", "cve", threat_information2_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-threat-information3", "Vulnerabilities", threat_information3_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-threat-information4", "CVE",threat_information4_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-threat-information5", "CVE", threat_information5_transform.clean_and_rename, True),
+# ("infoservices-cybersecurity-vuln-static-mcafeeoutput-data1", "Vulnerabilities", mcafeeoutput_data1_transform.clean_and_rename, True),
+# ("infoservices-cybersecurity-vuln-static-mcafeeoutput-data2", "Vulnerabilities", mcafeeoutput_data2_transform.clean_and_rename, True),
+# ("infoservices-cybersecurity-vuln-static-mcafeeoutput-data3", "Vulnerabilities", mcafeeoutput_data3_transform.clean_and_rename, True),
+# ("infoservices-cybersecurity-vuln-static-Packetstorm-Exploits", "CVE", packetstorm_exploits_transform.clean_and_rename, True),
 
 
 ]
