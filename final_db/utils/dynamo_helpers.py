@@ -7,29 +7,78 @@ import boto3
 from utils.time_utils import iso_now
 
 
-def parallel_scan(table, total_segments=8, filter_expr=None, log=None):
-    """Parallel scan helper for DynamoDB."""
-    log = log or logging.getLogger("vuln-sync")
-    from concurrent.futures import ThreadPoolExecutor
+def parallel_scan(table, total_segments=8, filter_expr=None, log=None, max_retries=3, backoff=1.5):
+    """
+    High-performance parallel scan for DynamoDB.
+    - Uses multiple threads for scanning partitions concurrently.
+    - Handles pagination, throttling, and transient network errors.
+    - Returns all items from the table (or filtered subset if filter_expr provided).
+    """
+
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import botocore
+
+    log = log or logging.getLogger("vuln-scan")
+
+    # Use a low-level client for thread-safe parallelism
+    dynamodb_client = boto3.client("dynamodb", region_name=table.meta.client.meta.region_name)
+    paginator = dynamodb_client.get_paginator("scan")
 
     def scan_segment(seg):
-        params = {"Segment": seg, "TotalSegments": total_segments}
+        """Scan a single DynamoDB partition segment."""
+        params = {
+            "TableName": table.name,
+            "Segment": seg,
+            "TotalSegments": total_segments,
+        }
         if filter_expr is not None:
             params["FilterExpression"] = filter_expr
 
         items = []
-        resp = table.scan(**params)
-        items.extend(resp.get("Items", []))
-        while "LastEvaluatedKey" in resp:
-            resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **params)
-            items.extend(resp.get("Items", []))
+        retries = 0
+
+        while True:
+            try:
+                for page in paginator.paginate(**params):
+                    items.extend(page.get("Items", []))
+                break  # exit retry loop if successful
+
+            except botocore.exceptions.ClientError as e:
+                error_code = e.response["Error"]["Code"]
+                if error_code in ("ProvisionedThroughputExceededException", "ThrottlingException"):
+                    retries += 1
+                    if retries > max_retries:
+                        log.error(f"❌ Segment {seg}: exceeded max retries ({max_retries}).")
+                        break
+                    sleep_time = backoff ** retries
+                    log.warning(f"⚠️ Segment {seg}: throttled, retry {retries}/{max_retries}, sleeping {sleep_time:.2f}s")
+                    time.sleep(sleep_time)
+                else:
+                    log.error(f"❌ Segment {seg}: {e}")
+                    break
+            except Exception as e:
+                log.error(f"⚠️ Unexpected error in segment {seg}: {e}")
+                break
+
+        log.debug(f"Segment {seg} done: {len(items)} items")
         return items
 
-    with ThreadPoolExecutor(max_workers=total_segments) as ex:
-        results = list(ex.map(scan_segment, range(total_segments)))
+    start = time.time()
+    all_items = []
 
-    all_items = [item for sub in results for item in sub]
-    log.info(f" Scan complete for {table.name}: {len(all_items)} items")
+    log.info(f"⚙️ Starting parallel scan with {total_segments} segments on table '{table.name}'")
+
+    # Run all segments in parallel
+    with ThreadPoolExecutor(max_workers=total_segments) as executor:
+        futures = [executor.submit(scan_segment, seg) for seg in range(total_segments)]
+        for future in as_completed(futures):
+            segment_items = future.result()
+            all_items.extend(segment_items)
+
+    duration = time.time() - start
+    log.info(f"✅ Scan complete for {table.name}: {len(all_items)} items in {duration:.2f}s")
+
     return all_items
 
 

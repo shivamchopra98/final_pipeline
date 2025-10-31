@@ -1,5 +1,4 @@
 import logging
-import copy
 from typing import Dict, Any, List
 from utils.cve_utils import extract_cves, normalize_cve
 
@@ -43,33 +42,37 @@ IBM_FINAL_COLUMNS = [
 
 
 def _get_field(record: Dict[str, Any], names):
+    """Return the first valid (non-null) field value from the list of possible names."""
     for n in names:
         if n in record and record[n] not in (None, "", "null", "NULL"):
             return record[n]
     return None
 
 
-def clean_and_rename(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+def clean_and_rename(record: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Transform IBM merged record(s) into the canonical schema.
-    - Handles multiple CVEs in a single field (explodes into multiple rows)
+    Transform IBM merged record into canonical schema for final table.
+    - Handles multiple CVEs in a single field (joins them into one merged dict)
     - Normalizes CVEs using extract_cves()
     - Prefixes mapped fields
     - Fills missing values with None
-    - Does not propagate uploaded_date
+    - Returns a single dict (safe for left_join_loader)
     """
-    out_list: List[Dict[str, Any]] = []
 
-    # ✅ extract all possible CVEs
+    # ✅ Extract all possible CVEs
     raw_cve = _get_field(
         record,
         ["CVE", "CVE_ID", "cve", "cve_id", "vuln_ID_link", "vuln_id_link", "Vuln_ID_Link"],
     )
     cve_list = extract_cves(raw_cve)
 
-    # fallback if no valid CVE found
+    # If no valid CVE found, fallback to None
     if not cve_list:
         cve_list = [None]
+
+    # ✅ Create comma-joined CVE list (safe single field for left join)
+    primary_cve = cve_list[0]
+    joined_cves = ", ".join(cve_list) if len(cve_list) > 1 else primary_cve
 
     rename_map = {
         "Affected_Products": "ibm_affected_products",
@@ -106,23 +109,22 @@ def clean_and_rename(record: Dict[str, Any]) -> List[Dict[str, Any]]:
         "vuln_ID_link": "ibm_vuln_id_link",
     }
 
-    # ✅ map static fields once
-    base = {}
+    # ✅ Map static fields once
+    out: Dict[str, Any] = {}
     for old, new in rename_map.items():
         val = _get_field(record, [old])
-        if val is not None:
-            base[new] = val
-        else:
-            base[new] = None
+        out[new] = val if val is not None else None
 
-    base["ibm_source"] = "ibm_merged"
+    # ✅ Add normalized CVE(s)
+    out["cve_id"] = normalize_cve(primary_cve) if primary_cve else None
+    out["ibm_source"] = "ibm_merged"
 
-    # ✅ explode by CVE
-    for cve in cve_list:
-        new_rec = dict(base)
-        new_rec["cve_id"] = normalize_cve(cve) if cve else None
-        for col in IBM_FINAL_COLUMNS:
-            new_rec.setdefault(col, None)
-        out_list.append(new_rec)
+    # If there were multiple CVEs, store them in a combined field for traceability
+    if len(cve_list) > 1:
+        out["ibm_cve_list"] = joined_cves  # optional extra field
 
-    return out_list
+    # ✅ Fill all missing columns with None
+    for col in IBM_FINAL_COLUMNS:
+        out.setdefault(col, None)
+
+    return out
