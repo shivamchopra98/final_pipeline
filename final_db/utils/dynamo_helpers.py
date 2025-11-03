@@ -22,8 +22,8 @@ def parallel_scan(table, total_segments=8, filter_expr=None, log=None, max_retri
     log = log or logging.getLogger("vuln-scan")
 
     # Use a low-level client for thread-safe parallelism
-    dynamodb_client = boto3.client("dynamodb", region_name=table.meta.client.meta.region_name)
-    paginator = dynamodb_client.get_paginator("scan")
+    dynamodb_resource = boto3.resource("dynamodb", region_name=table.meta.client.meta.region_name)
+    table = dynamodb_resource.Table(table.name)
 
     def scan_segment(seg):
         """Scan a single DynamoDB partition segment."""
@@ -163,8 +163,9 @@ def get_all_cve_ids(dynamodb, table_name, log=None, total_segments=8):
     """
     Scan the given DynamoDB table to collect all CVE IDs.
     Used for left joins to ensure we match existing final data.
+    Handles both raw DynamoDB JSON and deserialized records.
     """
-    from boto3.dynamodb.conditions import Key, Attr
+    from boto3.dynamodb.types import TypeDeserializer
     import botocore
     import time
 
@@ -173,14 +174,26 @@ def get_all_cve_ids(dynamodb, table_name, log=None, total_segments=8):
     log.info(f"🧩 Scanning {table_name} to collect all CVE IDs...")
 
     items = []
+    deserializer = TypeDeserializer()
+
     try:
         from utils.dynamo_helpers import parallel_scan
         all_records = parallel_scan(table, log=log, total_segments=total_segments)
-        items = [r["cve_id"] for r in all_records if "cve_id" in r]
+
+        for r in all_records:
+            if "cve_id" in r:
+                val = r["cve_id"]
+                # Handle both {"S": "CVE-..."} and plain strings
+                if isinstance(val, dict):
+                    val = deserializer.deserialize(val)
+                if isinstance(val, str):
+                    items.append(val.strip())
+
     except botocore.exceptions.ClientError as e:
         log.error(f"❌ Error collecting CVE IDs from {table_name}: {e}")
     except Exception as e:
         log.error(f"⚠️ Unexpected error scanning {table_name}: {e}")
 
-    log.info(f"📦 Found {len(items)} CVE IDs in {table_name}.")
-    return set(items)
+    unique_cves = set(items)
+    log.info(f"📦 Found {len(unique_cves)} unique CVE IDs in {table_name}.")
+    return unique_cves

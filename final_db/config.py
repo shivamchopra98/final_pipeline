@@ -19,6 +19,7 @@ from transformations import (
     cisa_transform,
     exploitdb_transform,
     metasploit_transform,
+    epss_transform
 )
 
 from transformations.static_data import (
@@ -48,9 +49,10 @@ packetstorm_exploits_transform
 
 # Each entry: (table_name, join_key, transform_fn, is_static)
 SOURCE_SPECS = [
-    # ("infoservices-cybersecurity-cisa-data", "cveID", cisa_transform.clean_and_rename, False),
-    # ("infoservices-cybersecurity-vuln-exploitdb-data", "CVE_id", exploitdb_transform.clean_and_rename, False),
-    # ("infoservices-cybersecurity-vuln-metasploit-data", "cve_id", metasploit_transform.clean_and_rename, False),
+#     ("infoservices-cybersecurity-cisa-data", "cveID", cisa_transform.clean_and_rename, False),
+#     ("infoservices-cybersecurity-vuln-exploitdb-data", "CVE_id", exploitdb_transform.clean_and_rename, False),
+#     ("infoservices-cybersecurity-vuln-metasploit-data", "cve_id", metasploit_transform.clean_and_rename, False),
+# ("infoservices-cybersecurity-epss-data", "cve", epss_transform.transform_epss_records, False),
 
     # ("infoservices-cybersecurity-vuln-static-APTfinal", "CVE_Exploited", apt_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-aptgroup", "CVE_Exploited", aptgroup_transform.clean_and_rename, True),
@@ -60,7 +62,7 @@ SOURCE_SPECS = [
     # (
     # "infoservices-cybersecurity-vuln-static-exploit-output", "CVE_ID", exploit_output_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-exploits-kits", "cve", exploitkit_transform.clean_and_rename, True),
-    ("infoservices-cybersecurity-vuln-static-ibm-merged-data", "CVE", ibm_merged_transform.clean_and_rename, True),
+    # ("infoservices-cybersecurity-vuln-static-ibm-merged-data", "CVE", ibm_merged_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-intruder-data", "CVE ID", intruder_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-packet-output", "cve_id", packet_output_transform.clean_and_rename, True),
     # ("infoservices-cybersecurity-vuln-static-packetalone-output", "cve_id", packetalone_transform.clean_and_rename, True),
