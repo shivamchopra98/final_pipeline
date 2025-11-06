@@ -1,22 +1,23 @@
-import { FindingsFunnel } from "@/components/FindingsFunnel";
-import { HostFindingsTable } from "@/components/HostFindingsTable";
-import { mockData } from "@/data/mockData";
+import React from "react";
+import { useData } from "@/hooks/DataContext";
+import FindingsTable from "../components/FindingsTable";
 
-export default function Findings() {
-  return (
-    <div className="space-y-8 animate-fade-in">
-      <div>
-        <h1 className="text-3xl font-bold text-foreground mb-2">Vulnerability Findings</h1>
-        <p className="text-muted-foreground">
-          Detailed analysis of security vulnerabilities across your infrastructure
-        </p>
+export default function FindingsPage() {
+  const { data } = useData();
+
+  if (!data || data.length === 0)
+    return (
+      <div className="text-slate-300">
+        No findings yet — upload a file first.
       </div>
+    );
 
-      {/* Severity Funnel */}
-      <FindingsFunnel data={mockData.severityDistribution} />
-
-      {/* Detailed Findings Table */}
-      <HostFindingsTable data={mockData.findingsTable} />
+  return (
+    <div>
+      <h2 className="text-2xl font-semibold mb-4">All Vulnerability Findings</h2>
+      <div className="bg-slate-800 p-4 rounded shadow">
+        <FindingsTable rows={data} />
+      </div>
     </div>
   );
 }

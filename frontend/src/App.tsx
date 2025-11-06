@@ -1,49 +1,33 @@
-import { Toaster } from "@/components/ui/toaster";
-import { Toaster as Sonner } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/AppSidebar";
-import { ThemeProvider } from "@/components/ThemeProvider";
-import Dashboard from "./pages/Dashboard";
-import Findings from "./pages/Findings";
-import Upload from "./pages/Upload";
-import NotFound from "./pages/NotFound";
+import React from "react";
+import { Routes, Route, Link } from "react-router-dom";
+import UploadPage from "./pages/Upload";
+import DashboardPage from "./pages/Dashboard";
+import FindingsPage from "./pages/Findings";
+import { DataProvider } from "./hooks/DataContext";
 
-const queryClient = new QueryClient();
+export default function App() {
+  return (
+    <DataProvider>
+      <div className="min-h-screen bg-slate-900 text-slate-100">
+        <header className="bg-slate-800 p-4 shadow-md">
+          <div className="container mx-auto flex items-center justify-between">
+            <h1 className="text-xl font-bold">InfoX — Vulnerability Accelerator</h1>
+            <nav className="space-x-4">
+              <Link className="hover:underline" to="/">Upload</Link>
+              <Link className="hover:underline" to="/dashboard">Dashboard</Link>
+              <Link className="hover:underline" to="/findings">Findings</Link>
+            </nav>
+          </div>
+        </header>
 
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <ThemeProvider defaultTheme="dark">
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <BrowserRouter>
-          <SidebarProvider>
-            <div className="flex min-h-screen w-full">
-              <AppSidebar />
-              <div className="flex-1 flex flex-col">
-                <header className="sticky top-0 z-10 flex h-14 items-center gap-4 border-b bg-background px-6">
-                  <SidebarTrigger />
-                  <div className="flex-1" />
-                </header>
-                <main className="flex-1 p-6 overflow-auto">
-                  <Routes>
-                    <Route path="/" element={<Dashboard />} />
-                    <Route path="/findings" element={<Findings />} />
-                    <Route path="/upload" element={<Upload />} />
-                    {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-                    <Route path="*" element={<NotFound />} />
-                  </Routes>
-                </main>
-              </div>
-            </div>
-          </SidebarProvider>
-        </BrowserRouter>
-      </TooltipProvider>
-    </ThemeProvider>
-  </QueryClientProvider>
-);
-
-export default App;
+        <main className="container mx-auto p-6">
+          <Routes>
+            <Route path="/" element={<UploadPage />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/findings" element={<FindingsPage />} />
+          </Routes>
+        </main>
+      </div>
+    </DataProvider>
+  );
+}
