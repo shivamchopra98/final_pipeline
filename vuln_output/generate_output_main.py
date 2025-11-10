@@ -5,6 +5,7 @@ import pandas as pd
 import csv
 from decimal import Decimal
 
+# 🔹 Import utils
 from utils.vrr_utils import generate_vrr_score
 from utils.id_utils import generate_host_finding_id
 from utils.transform_utils import prepare_output_dataframe
@@ -14,10 +15,14 @@ from utils.dynamodb_utils import (
     extract_threats_from_item,
 )
 
+# 🔹 Import scanner detection utils
+from utils.scanner_detector import detect_scanner, build_unified_output
+
+
 # ---------- ARGUMENT PARSER ----------
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--input", "-i", default="vuln_input_a.csv", help="Input Nessus CSV")
+    p.add_argument("--input", "-i", default="vuln_input_a.csv", help="Input scanner CSV")
     p.add_argument("--output", "-o", default="vulnerability_output.csv", help="Output CSV")
     p.add_argument("--table", "-t", default="infoservices-cybersecurity-vuln-final-data", help="DynamoDB table name")
     p.add_argument("--workers", "-w", type=int, default=4, help="Number of parallel workers for DynamoDB batches")
@@ -27,7 +32,7 @@ def parse_args():
 
 # ---------- UTILITIES ----------
 def split_cve_cell(cell: str):
-    """Split a CSV cell that may contain multiple CVEs (comma/semicolon separated)"""
+    """Split a CSV cell that may contain multiple CVEs (comma/semicolon separated)."""
     if not cell or pd.isna(cell):
         return []
     parts = [p.strip() for p in str(cell).replace(";", ",").split(",")]
@@ -104,12 +109,21 @@ def main():
                 }
             )
         pd.DataFrame(rows).to_csv(INPUT_FILE, index=False)
-        print(f"Test input created: {INPUT_FILE} (100 test CVEs)")
+        print(f"✅ Test input created: {INPUT_FILE} (100 test CVEs)")
 
     print(f"🔍 Reading input from: {os.path.abspath(INPUT_FILE)}")
-    with open(INPUT_FILE, "r", encoding="latin1") as f:
-        df = pd.read_csv(f)
+    df = pd.read_csv(INPUT_FILE, encoding="latin1")
 
+    # ---------- SCANNER DETECTION ----------
+    print("⚡ Detecting scanner type...")
+    scanner_name = detect_scanner(df)
+    print(f"✅ Detected Scanner: {scanner_name}")
+
+    # ---------- STANDARDIZE COLUMNS ----------
+    print("🧩 Normalizing columns to unified schema...")
+    df = build_unified_output(df, scanner_name)
+
+    # ---------- CONTINUE EXISTING PIPELINE ----------
     base_out = prepare_output_dataframe(df, generate_vrr_score, generate_host_finding_id)
 
     # ---------- Collect CVEs ----------
@@ -154,7 +168,6 @@ def main():
                 for cw in extract_cwes_from_item(item):
                     matched_cwes.add(cw)
 
-        # ✅ Build nested Threat JSON (instead of full_record)
         if matched_full_records:
             merged_threat = {}
             for rec in matched_full_records:
@@ -204,8 +217,8 @@ def main():
         print("⚠️ openpyxl not installed. Run 'pip install openpyxl' to enable Excel export.")
 
     print(f"✅ Output file generated successfully with {len(filtered_out)} matched CVE records.")
-    print(f"Global unique CWEs found across matches: {sorted(list(global_cwe_set))}")
-    print(f"Global unique Threats found across matches: {sorted(list(global_threats))}")
+    print(f"🌐 Global unique CWEs found: {sorted(list(global_cwe_set))}")
+    print(f"🔥 Global unique Threats found: {sorted(list(global_threats))}")
 
 
 if __name__ == "__main__":
