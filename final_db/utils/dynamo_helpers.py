@@ -25,6 +25,8 @@ def parallel_scan(table, total_segments=8, filter_expr=None, log=None, max_retri
     dynamodb_resource = boto3.resource("dynamodb", region_name=table.meta.client.meta.region_name)
     table = dynamodb_resource.Table(table.name)
 
+    # Create paginator once (thread-safe)
+    paginator = table.meta.client.get_paginator("scan")
     def scan_segment(seg):
         """Scan a single DynamoDB partition segment."""
         params = {

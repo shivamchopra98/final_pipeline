@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import List, Dict, Any
 
 # utils
-from utils.vrr_utils import generate_vrr_score
+from utils.vrr_utils import calculate_vrr_score
 from utils.id_utils import generate_host_finding_id
 from utils.transform_utils import prepare_output_dataframe
 from utils.dynamodb_utils import batch_get_by_cves, extract_cwes_from_item
@@ -100,7 +100,7 @@ def process_file(input_path: str, table: str, workers: int = 6) -> pd.DataFrame:
     # -----------------------------------------------------------
     # Prepare unified output frame
     # -----------------------------------------------------------
-    base = prepare_output_dataframe(df_raw, generate_vrr_score, generate_host_finding_id)
+    base = prepare_output_dataframe(df_raw, calculate_vrr_score, generate_host_finding_id)
 
     # -----------------------------------------------------------
     # DynamoDB Fetch
@@ -118,29 +118,40 @@ def process_file(input_path: str, table: str, workers: int = 6) -> pd.DataFrame:
     vulnerabilities = []
     weaknesses = []
     threats = []
+    vrr_scores = []  # <--- NEW
 
     for cves in row_cve_lists:
         matched_records = [cve_items.get(c) for c in cves if c in cve_items]
 
-        # Vulnerability list
         vul_list = []
         cwe_set = set()
 
         for rec in matched_records:
             if not rec:
                 continue
+
             cid = rec.get("cve_id") or rec.get("CVE")
             if cid:
                 vul_list.append(cid)
 
-            for cw in extract_cwes_from_item(rec):
-                cwe_set.add(cw)
+            raw_cwes = extract_cwes_from_item(rec)
+            for cw in raw_cwes:
+                if isinstance(cw, str) and cw.upper().startswith("CWE-"):
+                    cwe_set.add(cw.strip())
 
-        vulnerabilities.append(sorted(list(set(vul_list))))
-        weaknesses.append(sorted(list(cwe_set)))
-
-        # Build nested Threat JSON
+        vulnerabilities.append(sorted(set(vul_list)))
+        weaknesses.append(sorted(cwe_set))
         threats.append(format_threat_json(matched_records, cves))
+
+        # NEW — VRR Score from FIRST matched DynamoDB record
+        if matched_records:
+            vrr = calculate_vrr_score(matched_records[0])
+        else:
+            vrr = 0
+
+        vrr_scores.append(vrr)
+
+    base["VRR Score"] = vrr_scores
 
     # -----------------------------------------------------------
     # Add columns to DF

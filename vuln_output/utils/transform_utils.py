@@ -214,15 +214,16 @@ SCANNER_COLUMN_MAP = {
         "IPAddress": "Host"
     }
 }
+import pandas as pd
+from typing import Callable
+
 
 def detect_scanner(df: pd.DataFrame) -> str:
-    """Detect scanner type by matching most column names."""
     cols_lower = {c.lower() for c in df.columns}
     best_match = None
     best_score = 0
 
     for scanner, mapping in SCANNER_COLUMN_MAP.items():
-        # Count how many of the expected columns exist
         score = sum(1 for src_col in mapping.values() if src_col and src_col.lower() in cols_lower)
         if score > best_score:
             best_match = scanner
@@ -233,12 +234,10 @@ def detect_scanner(df: pd.DataFrame) -> str:
 
 def prepare_output_dataframe(
     df: pd.DataFrame,
-    vrr_func: Callable[[], float],
+    vrr_func: Callable[[pd.Series], float],   # <-- FIXED
     id_func: Callable[[str, str], str]
 ) -> pd.DataFrame:
-    """
-    Build the unified output DataFrame for any scanner format.
-    """
+
     scanner = detect_scanner(df)
     mapping = SCANNER_COLUMN_MAP.get(scanner, {})
 
@@ -246,10 +245,11 @@ def prepare_output_dataframe(
         for c in candidates:
             if c and c in df.columns:
                 return df[c]
-        # fallback to a series of empty strings
         return pd.Series([""] * len(df), index=df.index)
 
     out = pd.DataFrame(index=df.index)
+
+    # Host Finding ID based on IP + Plugin ID
     out["Host Findings ID"] = df.apply(
         lambda r: id_func(
             str(r.get(mapping.get("IPAddress", "Host"), "")),
@@ -257,18 +257,22 @@ def prepare_output_dataframe(
         ),
         axis=1
     )
-    out["VRR Score"] = [vrr_func() for _ in range(len(df))]
+
+    # VRR Score — row passed to calculate_vrr_score
+    out["VRR Score"] = 0  # placeholder
+    # Identify scanner
     out["Scanner Name"] = scanner
+
     out["Scanner plugin ID"] = pick_col(mapping.get("Scanner plugin ID", ""), "Plugin ID")
     out["Vulnerability name"] = pick_col(mapping.get("Vulnerability name", ""), "Name")
     out["Scanner Reported Severity"] = pick_col(mapping.get("Scanner Reported Severity", ""), "Risk")
     out["Scanner Severity"] = pick_col(mapping.get("Scanner Severity", ""), "CVSS")
-    # Description may need to combine two fields if analogous to your original "Synopsis + Description"
+
     out["Description"] = (
-        pick_col(mapping.get("Description", ""), "Description")
-        .fillna("") + " " +
+        pick_col(mapping.get("Description", ""), "Description").fillna("") + " " +
         pick_col("Synopsis", "Summary / Description").fillna("")
     ).str.strip()
+
     out["Status"] = pick_col(mapping.get("Status", ""), "Status").replace("", "Open")
     out["Port"] = pick_col(mapping.get("Port", ""), "Port")
     out["Protocol"] = pick_col(mapping.get("Protocol", ""), "Protocol")
@@ -277,10 +281,11 @@ def prepare_output_dataframe(
     out["Possible patches"] = pick_col(mapping.get("Possible patches", ""), "See Also")
     out["IPAddress"] = pick_col(mapping.get("IPAddress", ""), "Host")
 
-    # Enrichment placeholders
+    # Placeholders to be filled later
     out["Vulnerabilities"] = ""
     out["Weaknesses"] = ""
     out["Threat"] = ""
 
     print(f"Detected scanner format: {scanner}")
     return out
+

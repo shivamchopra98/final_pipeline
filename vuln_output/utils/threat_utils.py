@@ -281,11 +281,37 @@ def build_threat_json(matched_items: List[Dict[str, Any]], input_cves: List[str]
     # ---------------------------------------------------------
     # EXPLOITABILITY %
     # ---------------------------------------------------------
-    if exploitability_scores:
+    # EXPLOITABILITY % (EPSS first, then CVSS, then fallback)
+    # ---------------------------------------------------------
+
+    # EPSS percentile from DynamoDB (0–1 float)
+    epss = None
+    for rec in matched_items:
+        if rec and isinstance(rec, dict):
+            if "epss_percentile" in rec:
+                try:
+                    epss = float(rec["epss_percentile"])
+                except:
+                    pass
+            elif "epss" in rec:
+                # support alternate key
+                try:
+                    epss = float(rec["epss"])
+                except:
+                    pass
+
+    if epss is not None:
+        # Convert EPSS percentile (0—1) to percentage
+        pct = f"{round(epss * 100, 2)}%"
+    elif exploitability_scores:
         mx = max(exploitability_scores)
-        pct = f"{round((mx / 10) * 100)}%" if mx <= 10 else f"{round(mx)}%"
-    else:
-        pct = f"{random.randint(60, 99)}%"
+        if mx <= 10:
+            pct = f"{round((mx / 10) * 100)}%"
+        else:
+            pct = f"{round(mx)}%"
+    # else:
+    #     # fallback until EPSS is available
+    #     pct = f"{random.randint(60, 99)}%"
 
     # ---------------------------------------------------------
     # SAFE RANSOMWARE FIELD FIX (NoneType ERROR FIX)
