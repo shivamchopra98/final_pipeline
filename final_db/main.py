@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — Master pipeline for CVE data integration into final DynamoDB table.
+fast_api.py — Master pipeline for CVE data integration into final DynamoDB table.
 
 Phases:
 1️⃣ Load NVD base data → Final Table

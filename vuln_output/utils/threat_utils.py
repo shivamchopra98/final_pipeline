@@ -309,9 +309,9 @@ def build_threat_json(matched_items: List[Dict[str, Any]], input_cves: List[str]
             pct = f"{round((mx / 10) * 100)}%"
         else:
             pct = f"{round(mx)}%"
-    # else:
-    #     # fallback until EPSS is available
-    #     pct = f"{random.randint(60, 99)}%"
+    else:
+        # fallback until EPSS is available
+        pct = f"{0}%"
 
     # ---------------------------------------------------------
     # SAFE RANSOMWARE FIELD FIX (NoneType ERROR FIX)
